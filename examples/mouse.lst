@@ -1,0 +1,2860 @@
+CYASM Version 1.95 
+(C) 1998,1999,2000 Cypress Semiconductor Corp.
+
+                ;******************************************************
+                ;
+                ;       file:           Low Cost Mouse firmware
+                ;       Date:           10/20/2000
+                ;       Description:This code provides the functionality  
+                ;                               for a USB HID compliant mouse.
+                ;       Target:         Cypress CY7C63231
+                ;
+                ; Overview
+                ;               There are four main tasks: 
+                ;                       * USB 
+                ;                       * buttons 
+                ;                       * optics 
+                ;                       * suspend/resume 
+                ;
+                ;       The system is started in the reset() routine at reset. 
+                ;               This routine initializes the USB variables, the IO ports, 
+                ;               the mouse logic, and the data space. All USB 
+                ;               communication occurs on an interrupt basis.
+                ; USB
+                ;               Endpoint 0 is used to support Control Transfers and 
+                ;               vendor specific requests.  During enumeration setup
+                ;               commands are sent to endpoint1 to initialize the
+                ;               USB device and to extract configuration information
+                ;               from the device
+                ;
+                ;               Endpoint 1 is used to transfer interrupt data back to
+                ;               the host.  In this case we transfer data from the 
+                ;               button and optics back to the host. 
+                ; Buttons
+                ;               The buttons are read and debounced every millisecond in
+                ;               the main task loop.
+                ; Optics
+                ;               The optics are continuously polled in the main loop.  The
+                ;               quadrature state of the optics tells us which direction
+                ;               the mouse is moving in.  This data is sent back to the
+                ;               host as an offset from the last time the mouse was polled
+                ;               for data by the host.
+                ; Suspend/Resume
+                ;               Every millisecond, the USB is polled for activity.  If no
+                ;               activity occurs for three milliseconds, then it is assumed
+                ;               that the USB is in suspend.  Because this device supports
+                ;               remote wakeup, pressing the buttons or moving the mouse
+                ;               causes the firmware to send resume signalling back to the
+                ;               host to wakeup and resume operation.
+                ;
+                ; Endpoint1 packet definition
+                ;
+                ; Byte  Usage
+                ;  0    Button Data 7-3 Not used, 2=middle, 1=right, 0=left
+                ;  1    horizontal displacement measured via the optics
+                ;  2    vertical displacement measured via the optics
+                ;  3    Wheel displacement 0x01 for forward, 0xFF for backward
+                ;
+                ;
+                ; Port Usage
+                ;
+                ;                        -------------------
+                ;               X0      | P0[0]         P0[4]   |  Z1   
+                ;               X1      | P0[1]         P0[5]   |  Z0   
+                ;               Y0      | P0[2]         P0[6]   |  OPTIC CONTROL        
+                ;               Y1      | P0[3]         P0[7]   |  LEFT 
+                ;        RIGHT  | P1[0]         P1[1]   |  MIDDLE       
+                ;                       | P1[2]         P1[3]   |       
+                ;       GND             | VSS           D+/SCLK |  D+
+                ;       GND             | VPP           D-/SDATA|  D-   
+                ;       PULLUP  | VREG          VCC             |       +5
+                ;                       | XTALIN        XTALOUT |
+                ;                        -------------------
+                ;
+                ; Revisions:
+                ;                       10/20/2000 - Creation 
+                ;
+                ;**********************************************************
+                ;
+                ;               Copyright 2000 Cypress Semiconductor
+                ;       This code is provided by Cypress as a reference.  Cypress 
+                ;       makes no claims or warranties to this firmware's 
+                ;       suitability for any application. 
+                ;
+                ;********************************************************** 
+                
+0000                    CPU     63743
+                
+0000                    XPAGEON
+                
+                ;**************************************
+                ; Processor specific definitions
+                
+00E8=           ep2_dmabuff:                            equ     E8h
+00E8=           ep2_dmabuff0:                           equ     ep2_dmabuff+0
+00E9=           ep2_dmabuff1:                           equ     ep2_dmabuff+1
+00EA=           ep2_dmabuff2:                           equ     ep2_dmabuff+2
+00EB=           ep2_dmabuff3:                           equ     ep2_dmabuff+3
+00EC=           ep2_dmabuff4:                           equ     ep2_dmabuff+4
+00ED=           ep2_dmabuff5:                           equ     ep2_dmabuff+5
+00EE=           ep2_dmabuff6:                           equ     ep2_dmabuff+6
+00EF=           ep2_dmabuff7:                           equ     ep2_dmabuff+7
+                
+00F0=           ep1_dmabuff:                            equ     F0h
+00F0=           ep1_dmabuff0:                           equ     ep1_dmabuff+0
+00F1=           ep1_dmabuff1:                           equ     ep1_dmabuff+1
+00F2=           ep1_dmabuff2:                           equ     ep1_dmabuff+2
+00F3=           ep1_dmabuff3:                           equ     ep1_dmabuff+3
+00F4=           ep1_dmabuff4:                           equ     ep1_dmabuff+4
+00F5=           ep1_dmabuff5:                           equ     ep1_dmabuff+5
+00F6=           ep1_dmabuff6:                           equ     ep1_dmabuff+6
+00F7=           ep1_dmabuff7:                           equ     ep1_dmabuff+7
+                
+00F8=           ep0_dmabuff:                            equ     F8h
+00F8=           ep0_dmabuff0:                           equ     ep0_dmabuff+0
+00F9=           ep0_dmabuff1:                           equ     ep0_dmabuff+1
+00FA=           ep0_dmabuff2:                           equ     ep0_dmabuff+2
+00FB=           ep0_dmabuff3:                           equ     ep0_dmabuff+3
+00FC=           ep0_dmabuff4:                           equ     ep0_dmabuff+4
+00FD=           ep0_dmabuff5:                           equ     ep0_dmabuff+5
+00FE=           ep0_dmabuff6:                           equ     ep0_dmabuff+6
+00FF=           ep0_dmabuff7:                           equ     ep0_dmabuff+7
+                
+                
+                
+                ;**************************************
+                ; register definitions
+                
+0000=           port0:                                                          equ     00h ; GPIO data port 0
+0001=           port1:                                                          equ     01h ; GPIO data port 1
+0002=           port2:                                                          equ     02h ; GPIO data port 2
+0020=                   SCLK:                                   equ     20h
+0020=                   DPLUS:                                  equ     20h
+0010=                   SDATA:                                  equ     10h
+0010=                   DMINUS:                                 equ     10h
+0002=                   XTALIN:                                 equ     02h
+0001=                   VREG:                                   equ     01h
+                
+0004=           port0_int:                                                      equ     04h ; Interrupt enable for Port 0
+0005=           port1_int:                                                      equ     05h ; Interrupt enable for Port 1
+0006=           port0_int_polarity:                                     equ     06h ; Interrupt polarity for Port 0
+0007=           port1_int_polarity:                                     equ     07h ; Interrupt polarity for Port 1
+                
+000A=           port0_mode0:                                            equ     0Ah ; Mode Configuration 0 for Port 0
+000B=           port0_mode1:                                            equ     0Bh ; Mode Configuration 1 for Port 0
+000C=           port1_mode0:                                            equ     0Ch ; Mode Configuration 0 for Port 1
+000D=           port1_mode1:                                            equ     0Dh ; Mode Configuration 1 for Port 1
+                
+0010=           usb_address:                                            equ     10h ; USB device address
+0080=                   ADDRESS_ENABLE:                 equ     80h
+007F=                   ADDRESS_MASK:                   equ     7Fh
+                
+0011=           ep0_count:                                                      equ     11h     ; Endpoint 0 counter
+0080=                   DATA_TOGGLE:                    equ     80h
+0040=                   DATA_VALID:                             equ     40h
+000F=                   BYTE_COUNT:                             equ     0Fh
+0012=           ep0_mode:                                                       equ     12h ; Endpoint 0 configuration
+0080=                   EP0_SETUP:                              equ     80h
+0040=                   EP0_IN:                                 equ     40h
+0020=                   EP0_OUT:                                equ     20h
+0010=                   EP0_ACK:                                equ     10h
+000F=                   MODE_MASK:                              equ     0Fh
+0013=           ep1_count:                                                      equ     13h ; Endpoint 1 counter
+0014=           ep1_mode:                                                       equ     14h ; Endpoint 1 configuration
+0015=           ep2_count:                                                      equ     15h ; Endpoint 2 counter
+0016=           ep2_mode:                                                       equ     16h ; Endpoint 2 configuration
+0080=                   EP_STALL:                               equ     80h
+0010=                   EP_ACK:                                 equ     10h
+                
+001F=           usb_status:                                                     equ     1Fh ; USB upstream status and control
+0080=                   PS2_PULLUP:                             equ     80h
+0040=                   VREG_ENABLE:                    equ     40h
+0020=                   USB_PS2_MODE:                   equ     20h
+0008=                   BUS_ACTIVITY:                   equ     08h
+0004=                   CONTROL2:                               equ     04h
+0002=                   CONTROL1:                               equ     02h
+0001=                   CONTROL0:                               equ     01h
+                
+0000=                   NOT_FORCING:                    equ     00h
+0001=                   FORCE_K:                                equ     01h
+0002=                   FORCE_J:                                equ     02h
+0003=                   FORCE_SE0:                              equ     03h
+0004=                   FORCEBOTH_LOW:                  equ     04h
+0005=                   FORCESDATA_LOW:                 equ     05h
+0006=                   FORCESCLK_LOW:                  equ     06h
+0007=                   FORCE_HIZ:                              equ     07h
+                
+0020=           global_int:                                                     equ     20h ; Global interrupt enable
+0080=                   WAKEUP_INT:                             equ     80h
+0040=                   GPIO_INT:                               equ     40h
+0020=                   CAPTUREB_INT:                   equ     20h
+0010=                   CAPTUREA_INT:                   equ     10h
+0008=                   SPI_INT:                                equ     08h
+0004=                   1MS_INT:                                equ     04h
+0002=                   128US_INT:                              equ     02h
+0001=                   USB_RESET_INT:                  equ     01h
+                
+0021=           endpoint_int:                                           equ     21h ; USB endpoint interrupt enable
+0004=                   EP2_INT:                                equ     04h
+0002=                   EP1_INT:                                equ     02h
+0001=                   EP0_INT:                                equ     01h
+                
+0024=           timer_lsb:                                                      equ     24h ; Lower eight bits of timer
+0025=           timer_msb:                                                      equ     25h ; Upper six bits of timer
+0026=           watchdog:                                                       equ     26h ; Clear watchdog Timer
+                
+0040=           capturea_rising:                                        equ     40h ; Capture timer A rising register
+0041=           capturea_falling:                                       equ     41h ; Capture timer A falling register
+0042=           captureb_rising:                                        equ     42h ; Capture timer B rising register
+0043=           captureb_falling:                                       equ     43h ; Capture timer B falling register
+0044=           capture_config:                                         equ     44h ; Capture timer configuration register
+0080=                   FIRST_EDGE_HOLD:                equ     80h
+0070=                   PRESCALE:                               equ     70h
+0040=                   PRESCALE2:                              equ     40h
+0020=                   PRESCALE1:                              equ     20h
+0010=                   PRESCALE0:                              equ     10h
+0008=                   CAPTUREB_FALL_INT:              equ     08h
+0004=                   CAPTUREB_RISE_INT:              equ     04h
+0002=                   CAPTUREA_FALL_INT:              equ     02h
+0001=                   CAPTUREA_RISE_INT:              equ     01h
+0045=           capture_status:                                         equ     45h ; Capture timer status register
+0008=                   CAPTUREB_FALL_EVENT:    equ     08h
+0004=                   CAPTUREB_RISE_EVENT:    equ     04h
+0002=                   CAPTUREA_FALL_EVENT:    equ     02h
+0001=                   CAPTUREA_RISE_EVENT:    equ     01h
+                
+0060=           spi_data:                                                       equ     60h     ; SPI data register
+0061=           spi_control:                                            equ     61h     ; SPI configuration register
+0080=                   TCMP:                                   equ     80h
+0040=                   TBF:                                    equ     40h
+0020=                   MODE1:                                  equ     20h
+0010=                   MODE0:                                  equ     10h
+0008=                   CPOL:                                   equ 08h
+0004=                   CPHA:                                   equ 04h
+0002=                   SCK_SELECT1:                    equ 02h
+0001=                   SCK_SELECT0:                    equ     01h     
+                
+00F8=           clock_config:                                           equ     F8h ; Internal/external oscillator configuration
+0080=                   EXT_DELAY:                              equ     80h
+0040=                   WAKEUP_ADJUST2:                 equ     40h
+0020=                   WAKEUP_ADJUST1:                 equ     20h
+0010=                   WAKEUP_ADJUST0:                 equ     10h
+0008=                   LVR_DISABLE:                    equ     08h
+0004=                   PRECISION_CLK:                  equ 04h
+0002=                   INTERNAL_CLK:                   equ     02h
+0001=                   EXTERNAL_CLK:                   equ     01h
+                
+00FF=           control:                                                        equ     FFh ; Processor status and control
+0080=                   IRQ_PENDING:                    equ     80h
+0040=                   WATCHDOG_RESET:                 equ     40h
+0020=                   USB_RESET:                              equ     20h
+0010=                   POWERON_RESET:                  equ     10h
+0008=                   SUSPEND:                                equ     08h
+0004=                   INTERRUPT_MASK:                 equ     04h
+0002=                   SINGLE_STEP:                    equ     02h
+0001=                   RUN:                                    equ     01h
+                
+                
+                ;**************************************
+                ; USB mode encoding
+                
+0000=           DISABLE:                        equ     00h
+0001=           NAK_IN_OUT:                     equ     01h
+0002=           STATUS_OUT_ONLY:        equ     02h
+0003=           STALL_IN_OUT:           equ     03h
+0004=           IGNORE_IN_OUT:          equ     04h
+0005=           ISOCHRONOUS_OUT:        equ     05h
+0006=           STATUS_IN_ONLY:         equ     06h
+0007=           ISOCHRONOUS_IN:         equ     07h
+0008=           NAK_OUT:                        equ     08h
+0009=           ACK_OUT:                        equ     09h
+000A=           NAK_OUT_STATUS_IN:      equ     0Ah
+000B=           ACK_OUT_NAK_IN:         equ     0Bh
+000C=           NAK_IN:                         equ     0Ch
+000D=           ACK_IN:                         equ     0Dh
+000E=           NAK_IN_STATUS_OUT:      equ     0Eh
+000F=           ACK_IN_STATUS_OUT:      equ     0Fh
+                
+                
+                ;**************************************
+                ; general use constants
+                
+00FF=           SET:                            equ     FFh
+0000=           CLEAR:                          equ     00h
+                
+                ;**********************************************************
+                ; USB Descriptor and Request constants
+                ;       source p172,,175 USB specification
+                ;**********************************************************
+                
+                
+                ;       Characterists of bmRequest Value
+                ;
+                ; D7    Data xfer direction
+                ;       0 = Host to device
+                ;       1 = Device to host
+                ;
+                ; D6..5 Type
+                ;       0 = Standard
+                ;       1 = Class
+                ;       2 = Vendor
+                ;       3 = Reserved
+                ;
+                ; D4..0 Recipient
+                ;       0 = Device
+                ;       1 = Interface
+                ;       2 = Endpoint
+                ;       3 = Other
+                ;       4..31 = Reserved
+                
+                
+                ;**************************************
+                ; bmRequestType
+0000=           HOSTTODEVICE:                   equ     00h
+0080=           DEVICETOHOST:                   equ     80h
+                
+0000=           STANDARD_TYPE:                  equ     00h
+0020=           CLASS_TYPE:                             equ     20h
+0040=           VENDOR_TYPE:                    equ     40h
+0060=           RESERVED_TYPE:                  equ     60h
+                
+0000=           DEVICE_RECIPIENT:               equ     00h
+0001=           INTERFACE_RECIPIENT:    equ     01h
+0002=           ENDPOINT_RECIPIENT:             equ     02h
+0003=           OTHER_RECIPIENT:                equ     03h
+                
+                ;**************************************
+                ; bRequest
+0000=           GET_STATUS:                             equ     00h
+0001=           CLEAR_FEATURE:                  equ     01h
+0003=           SET_FEATURE:                    equ     03h
+0005=           SET_ADDRESS:                    equ     05h
+0006=           GET_DESCRIPTOR:                 equ     06h
+0007=           SET_DESCRIPTOR:                 equ     07h
+0008=           GET_CONFIGURATION:              equ     08h
+0009=           SET_CONFIGURATION:              equ     09h
+000A=           GET_INTERFACE:                  equ     0Ah
+000B=           SET_INTERFACE:                  equ     0Bh
+000C=           SYNCH_FRAME:                    equ     0Ch
+                
+                
+                ;**************************************
+                ; Descriptor Types
+0001=           DEVICE:                                 equ     01h
+0002=           CONFIGURATION:                  equ     02h
+0003=           STRING:                                 equ     03h
+0004=           INTERFACE:                              equ     04h
+0005=           ENDPOINT:                               equ     05h
+                
+                ;**************************************
+                ; Feature Selectors
+0001=           DEVICE_REMOTE_WAKEUP:   equ     01h
+0000=           ENDPOINT_STALL:                 equ     00h
+                
+                ;**************************************
+                ; HID Class Request Types
+0001=           GET_REPORT:                             equ     01h
+0002=           GET_IDLE:                               equ     02h
+0003=           GET_PROTOCOL:                   equ     03h
+0009=           SET_REPORT:                             equ     09h
+000A=           SET_IDLE:                               equ     0Ah
+000B=           SET_PROTOCOL:                   equ     0Bh
+                
+                ;**************************************
+                ; HID report formats
+0000=           HID_BOOT:                               equ     00h
+0001=           HID_REPORT:                             equ     01h
+                
+                ;**************************************
+                ; ENDPOINT 0 SETUP REQUEST FIELDS
+0000=           BMREQUESTTYPE:                  equ     00h
+0001=           BREQUEST:                               equ     01h
+0002=           WVALUELO:                               equ     02h
+0003=           WVALUEHI:                               equ     03h
+0004=           WINDEXLO:                               equ     04h
+0005=           WINDEXHI:                               equ     05h
+0006=           WLENGTHLO:                              equ     06h
+0007=           WLENGTHHI:                              equ     07h
+                
+                
+                ;**************************************
+                ; EP0 IN TRANSACTION STATE MACHINE
+0000=           EP0_IN_IDLE:                            equ     00h
+0002=           CONTROL_READ_DATA:                      equ     02h
+0004=           NO_DATA_STATUS:                         equ     04h
+0006=           EP0_IN_STALL:                           equ     06h
+                
+                ;**************************************
+                ; EP0 NO-DATA CONTROL FLAGS
+0000=           ADDRESS_CHANGE_PENDING:         equ     00h
+0002=           NO_CHANGE_PENDING:                      equ     02h
+                
+                ;**************************************
+                ; RESPONSE SIZES
+0002=           DEVICE_STATUS_LENGTH:           equ     2
+0001=           DEVICE_CONFIG_LENGTH:           equ     1
+0002=           ENDPOINT_STALL_LENGTH:          equ 2
+0002=           INTERFACE_STATUS_LENGTH:        equ 2
+0001=           INTERFACE_ALTERNATE_LENGTH:     equ     1
+0001=           INTERFACE_PROTOCOL_LENGTH:      equ     1
+                
+                ;**************************************
+                ; INTERFACE CONSTANTS
+                
+0000=           LEFT_BUTTON_PORT:                       equ     port0
+0080=           LEFT_BUTTON:                            equ     80h
+0001=           RIGHT_BUTTON_PORT:                      equ     port1
+0001=           RIGHT_BUTTON:                           equ     01h
+0001=           MIDDLE_BUTTON_PORT:                     equ     port1
+0002=           MIDDLE_BUTTON:                          equ     02h
+                
+0001=           HID_LEFT_MOUSE_BUTTON:          equ     01h
+0002=           HID_RIGHT_MOUSE_BUTTON:         equ     02h
+0004=           HID_MIDDLE_MOUSE_BUTTON:        equ     04h
+                
+0000=           X_OPTICS_PORT:                          equ     port0
+0001=           X0:                                                     equ     01h
+0002=           X1:                                                     equ     02h
+                
+0000=           Y_OPTICS_PORT:                          equ     port0
+0004=           Y0:                                                     equ     04h
+0008=           Y1:                                                     equ     08h
+                
+0000=           Z_OPTICS_PORT:                          equ port0
+0020=           Z0:                                                     equ     20h
+0010=           Z1:                                                     equ     10h
+                
+0000=           OPTIC_CONTROL_PORT:                     equ     port0
+0040=           OPTIC_CONTROL:                          equ     40h
+                
+                ; button debounce time
+000F=           BUTTON_DEBOUNCE:                        equ 15
+                
+                ;**************************************
+                ; BUTTON STATE MACHINE
+0000=           NO_BUTTON_DATA_PENDING:         equ     00h
+0002=           BUTTON_DATA_PENDING:            equ     02h
+                
+                ;**************************************
+                ; OPTICS STATE MACHINE
+0000=           NO_OPTIC_DATA_PENDING:          equ     00h
+0002=           OPTIC_DATA_PENDING:                     equ     02h
+                
+                ;**************************************
+                ; EVENT STATE MACHINE
+0000=           NO_EVENT_PENDING:                       equ     00h
+0002=           EVENT_PENDING:                          equ     02h
+                
+                ;**************************************
+                ; TRANSACTION TYPES
+0000=           TRANS_NONE:                                     equ     00h
+0002=           TRANS_CONTROL_READ:                     equ     02h
+0004=           TRANS_CONTROL_WRITE:            equ     04h
+0006=           TRANS_NO_DATA_CONTROL:          equ     06h
+                
+                
+                ;**************************************
+                ; DATA MEMORY VARIABLES
+0020=           suspend_count:                          equ     20h                     ; usb suspend counter
+0021=           ep1_data_toggle:                        equ     21h                     ; endpoint 1 data toggle
+0022=           ep0_data_toggle:                        equ     22h                     ; endpoint 0 data toggle
+0023=           data_start:                                     equ     23h                     ; ROM table address, start of data
+0024=           data_count:                                     equ     24h                     ; data count to return to host
+0025=           maximum_data_count:                     equ     25h                     ; maximum size of data to return to host
+0026=           ep0_in_machine:                         equ     26h                     ; endpoint 0 IN state machine
+0027=           ep0_in_flag:                            equ     27h                     ; endpoint 0 flag for no-data control
+0028=           configuration:                          equ     28h                     ; configured/not configured state
+0029=           remote_wakeup:                          equ     29h                     ; remote wakeup on/off
+002A=           ep1_stall:                                      equ     2Ah                     ; endpoint 1 stall on/off
+002B=           idle:                                           equ     2Bh                     ; HID idle timer
+002C=           protocol:                                       equ     2Ch                     ; mouse protocol boot/report
+002D=           debounce_count:                         equ     2Dh                     ; debounce counters for buttons
+002E=           optic_status:                           equ     2Eh                     ; current optic status
+002F=           current_button_state:           equ     2Fh                     ; current button status 
+0030=           x_state:                                        equ     30h                     ; current optics x state
+0031=           y_state:                                        equ     31h                     ; current optics y state
+0032=           button_machine:                         equ     32h                     ; buttons/optics state machine
+0033=           temp:                                           equ     33h                     ; temporary register
+0034=           event_machine:                          equ     34h                     ; state machine for sending data back to host
+0035=           pending_data:                           equ     35h                     ; data pending during no-data control
+0036=           last_button_state:                      equ     36h                     ; last read value of buttons
+0037=           x_current_state:                        equ     37h                     ; y-axis current state
+0038=           y_current_state:                        equ     38h                     ; x-axis current state
+0039=           z_current_state:                        equ     39h                     ; z-axis current state
+003A=           x_last_state:                           equ     3Ah                     ; last read y-axis optics
+003B=           y_last_state:                           equ     3Bh                     ; last read x-axis optics
+003C=           z_last_state:                           equ     3Ch                     ; last read z-axis optics
+003D=           int_temp:                                       equ     3Dh                     ; interrupt routine temp variable
+003E=           idle_timer:                                     equ     3Eh                     ; HID idle timer
+003F=           idle_prescaler:                         equ     3Fh                     ; HID idle prescale (4ms)
+0040=           ep0_transtype:                          equ     40h                     ; Endpoint 0 transaction type
+0041=           wakeup_timer:                           equ     41h                     ; wakeup timer minimum count
+                
+                ;**********************************************************
+                ; Interrupt vector table
+                
+0000            ORG 00h                 
+                
+0000 80 1B [05] jmp     Main                                                                    ; Reset vector          
+                
+0002 81 83 [05] jmp     Bus_reset                                                               ; USB reset / PS2 interrupt
+                
+0004 80 1A [05] jmp     Error                                                                   ; 128us interrupt
+                
+0006 81 94 [05] jmp     1ms_timer                                                               ; 1.024ms interrupt
+                
+0008 82 22 [05] jmp     Endpoint0                                                               ; Endpoint 0 interrupt
+                
+000A 85 49 [05] jmp     Endpoint1                                                               ; Endpoint 1 interrupt
+                
+000C 80 1A [05] jmp     Error                                                                   ; Reserved
+                
+000E 80 1A [05] jmp     Error                                                                   ; Reserved
+                
+0010 80 1A [05] jmp     Error                                                                   ; Reserved
+                
+0012 80 1A [05] jmp     Error                                                                   ; Reserved
+                
+0014 80 1A [05] jmp     Error                                                                   ; GPIO interrupt vector
+                
+0016 85 6E [05] jmp     Wakeup                                                                  ; Wake-up interrupt vector 
+                
+                
+                ;**********************************************************
+                ; Program listing
+                
+001A            ORG  1Ah
+001A 00    [07] Error: halt
+                
+                ;**********************************************************
+                ;
+                ;       Interrupt handler: Main
+                ;       Purpose: The program jumps to this routine when
+                ;                the microcontroller has a power on reset.
+                ;
+                ;**********************************************************
+                
+001B            Main:
+                
+                        ;**********************************
+                        ; set wakeup timer interval and disable XTALOUT 
+001B 19 56 [04]         mov             A, WAKEUP_ADJUST2 | WAKEUP_ADJUST0 | PRECISION_CLK | INTERNAL_CLK 
+001D 2A F8 [05]         iowr    clock_config
+                
+                        ;**********************************
+                        ; setup data memory stack pointer
+001F 19 20 [04]         mov             A, 20h
+0021 30    [05]         swap    A, dsp          
+                
+                        ;**********************************
+                        ; clear variables
+0022 19 00 [04]         mov             A, 00h          
+0024 31 26 [05]         mov             [ep0_in_machine], A
+0026 31 28 [05]         mov             [configuration], A
+0028 31 2A [05]         mov             [ep1_stall], A
+002A 31 2B [05]         mov             [idle], A
+002C 31 20 [05]         mov             [suspend_count], A
+002E 31 2D [05]         mov             [debounce_count], A
+0030 31 30 [05]         mov             [x_state], A
+0032 31 31 [05]         mov             [y_state], A
+0034 31 F0 [05]         mov             [ep1_dmabuff0], A
+0036 31 F1 [05]         mov             [ep1_dmabuff1], A
+0038 31 F2 [05]         mov             [ep1_dmabuff2], A
+003A 31 F3 [05]         mov             [ep1_dmabuff3], A
+003C 31 32 [05]         mov             [button_machine], A
+003E 31 3A [05]         mov             [x_last_state], A
+0040 31 3B [05]         mov             [y_last_state], A
+0042 31 3C [05]         mov             [z_last_state], A
+0044 31 3D [05]         mov             [int_temp], A
+0046 31 3E [05]         mov             [idle_timer], A
+0048 31 3F [05]         mov             [idle_prescaler], A
+004A 31 34 [05]         mov             [event_machine], A
+004C 31 40 [05]         mov             [ep0_transtype], A
+004E 31 2F [05]         mov             [current_button_state], A
+0050 31 36 [05]         mov             [last_button_state], A
+0052 31 41 [05]         mov             [wakeup_timer], A
+                
+0054 19 01 [04]         mov             A, HID_REPORT
+0056 31 2C [05]         mov             [protocol], A
+                
+0058 19 FF [04]         mov             A, SET
+005A 31 29 [05]         mov             [remote_wakeup], A
+                
+                        
+                        ;**********************************
+                        ; set port I/O configuration
+                        ; *** NOTE - this is configured for the particular
+                        ; hardware you are dealing with.  You will need to change
+                        ; this section for the particular hardware you are working
+                        ; on
+                
+005C 19 80 [04]         mov             A, LEFT_BUTTON
+005E 2A 00 [05]         iowr    port0
+                
+0060 19 03 [04]         mov             A, RIGHT_BUTTON | MIDDLE_BUTTON
+0062 2A 01 [05]         iowr    port1
+                
+0064 19 40 [04]         mov             A, OPTIC_CONTROL                                                        ; set button pins in resistive mode 
+0066 2A 0A [05]         iowr    port0_mode0
+0068 19 C0 [04]         mov             A, LEFT_BUTTON | OPTIC_CONTROL 
+006A 2A 0B [05]         iowr    port0_mode1
+                
+006C 19 00 [04]         mov             A, 00h                                                                  ; remember that we have to drive
+006E 2A 0C [05]         iowr    port1_mode0                                                             ; unused pins to meet suspend current
+0070 19 FF [04]         mov             A, (RIGHT_BUTTON | MIDDLE_BUTTON | FCh )
+0072 2A 0D [05]         iowr    port1_mode1
+                
+                
+                        ;**********************************
+                        ; enable USB address for endpoint 0
+0074 19 80 [04]         mov             A, ADDRESS_ENABLE
+0076 2A 10 [05]         iowr    usb_address
+                
+                        ;**********************************
+                        ; enable global interrupts
+0078 19 05 [04]         mov             A, (1MS_INT | USB_RESET_INT)
+007A 2A 20 [05]         iowr    global_int
+                
+007C 19 01 [04]         mov     A, EP0_INT                      
+007E 2A 21 [05]         iowr    endpoint_int
+                
+0080 72    [04]         ei
+                
+                        ;**********************************
+                        ; enable USB pullup resistor
+0081 19 40 [04]         mov             A, VREG_ENABLE  
+0083 2A 1F [05]         iowr    usb_status
+                
+                
+0085            task_loop:
+                
+                        ;**********************************
+                        ; main loop watchdog clear
+0085 2A 26 [05]         iowr watchdog
+                
+                
+                ; this routine allows the user to map the button pins whereever
+                ; they want, as long as all the buttons remain on the same port.
+                ; in order to change the button ports you must change the mask
+                ; in the pin mask constants above and change the definition of the 
+                ; "button_port."  You must also change the way the port mode
+                ; is initialized in the reset routine.
+0087 1A 32 [05]         mov             A, [button_machine]                             ; read buttons every millisecond
+0089 E9 00 [07]         jacc    button_machine_jumptable
+                
+008B                    button_task:
+008B 1A 2F [05]         mov             A, [current_button_state]               ; read button states
+008D 17 36 [07]         cmp             A, [last_button_state]
+008F A0 99 [05]         jz              button_state_same:
+                
+0091                    button_state_different:                                 ; if the button state has changed, then
+0091 31 36 [05]                 mov             [last_button_state], A          ; reset the debounce timer and set 
+0093 19 00 [04]                 mov             A, 00h                                          ; last button value to the one just read
+0095 31 2D [05]                 mov             [debounce_count], A
+0097 80 B3 [05]                 jmp             button_task_done
+                        
+0099                    button_state_same:              
+0099 19 0E [04]                 mov             A, BUTTON_DEBOUNCE - 1          ; if at debounce count-1 then send
+009B 17 2D [07]                 cmp             A, [debounce_count]                     ; new value to host 
+009D A0 A9 [05]                 jz              set_button_event
+                
+009F                            increment_debounce_counter:                     ; otherwise increment debounce count
+009F 1A 2D [05]                         mov             A, [debounce_count]             ; if it's not already at the 
+00A1 16 0F [05]                         cmp             A, BUTTON_DEBOUNCE              ; BUTTON_DEBOUNCE value
+00A3 A0 B3 [05]                         jz              button_task_done
+00A5 23 2D [07]                         inc             [debounce_count]
+00A7 80 B3 [05]                         jmp             button_task_done
+                
+00A9                            set_button_event:                                       ; set event pending to signal packet
+00A9 23 2D [07]                         inc             [debounce_count]                ; needs to be sent to host
+00AB 19 02 [04]                         mov             A, EVENT_PENDING
+00AD 31 34 [05]                         mov             [event_machine], A
+                
+00AF 1A 2F [05]                         mov             A, [current_button_state]
+00B1 31 F0 [05]                         mov             [ep1_dmabuff0], A
+                
+00B3                                    button_task_done:
+00B3 19 00 [04]                         mov             A, NO_BUTTON_DATA_PENDING
+00B5 31 32 [05]                         mov             [button_machine], A
+                
+00B7                            no_button_task:
+                
+                
+                ; this routine allows the user to map the optics pins whereever
+                ; they want, as long as all the optics sets remain on the same port.
+                ; in order to change the optic ports you must change the mask
+                ; in the pin mask constants above.  You must also change the way 
+                ;the port mode is initialized in the reset routine.
+                
+00B7                    optic_task:
+00B7 19 00 [04]                 mov             A, 00h                                          ; reset optic values
+00B9 31 37 [05]                 mov             [x_current_state], A
+00BB 31 38 [05]                 mov             [y_current_state], A
+00BD 31 39 [05]                 mov             [z_current_state], A    
+                
+00BF                            read_x_optics:
+00BF 29 00 [05]                         iord    X_OPTICS_PORT
+00C1 41    [04]                         mov             X, A
+00C2                                    read_x0:
+00C2 10 01 [04]                                 and             A, X0
+00C4 A0 CA [05]                                 jz              read_x1
+00C6 19 01 [04]                                 mov             A, 01h
+00C8 33 37 [07]                                 or              [x_current_state], A
+00CA                                    read_x1:
+00CA 40    [04]                                 mov             A, X
+00CB 10 02 [04]                                 and             A, X1
+00CD A0 D3 [05]                                 jz              read_y_optics
+00CF 19 02 [04]                                 mov             A, 02h
+00D1 33 37 [07]                                 or              [x_current_state], A
+                
+00D3                            read_y_optics:
+00D3 29 00 [05]                         iord    Y_OPTICS_PORT
+00D5 41    [04]                         mov             X, A
+00D6                                    read_y0:
+00D6 10 04 [04]                                 and             A, Y0
+00D8 A0 DE [05]                                 jz              read_y1
+00DA 19 01 [04]                                 mov             A, 01h
+00DC 33 38 [07]                                 or              [y_current_state], A
+00DE                                    read_y1:
+00DE 40    [04]                                 mov             A, X
+00DF 10 08 [04]                                 and             A, Y1
+00E1 A0 E7 [05]                                 jz              read_z_optics
+00E3 19 02 [04]                                 mov             A, 02h
+00E5 33 38 [07]                                 or              [y_current_state], A
+                
+00E7                            read_z_optics:
+00E7 29 00 [05]                         iord    Z_OPTICS_PORT
+00E9 41    [04]                         mov             X, A
+00EA                                    read_z0:
+00EA 10 20 [04]                                 and             A, Z0
+00EC A0 F2 [05]                                 jz              read_z1
+00EE 19 01 [04]                                 mov             A, 01h
+00F0 33 39 [07]                                 or              [z_current_state], A
+00F2                                    read_z1:
+00F2 40    [04]                                 mov             A, X
+00F3 10 10 [04]                                 and             A, Z1
+00F5 A0 FB [05]                                 jz              analyze_x_optics
+00F7 19 02 [04]                                 mov             A, 02h
+00F9 33 39 [07]                                 or              [z_current_state], A
+                
+00FB                            analyze_x_optics:
+00FB 1A 3A [05]                         mov             A, [x_last_state]
+00FD 3B    [04]                         asl             A
+00FE 3B    [04]                         asl             A
+00FF 1F    [04]         XPAGE
+0100 0E 37 [06]                         or              A, [x_current_state]
+0102 3B    [04]                         asl             A
+0103 E9 08 [07]                         jacc    x_jumptable                             ; jump to transition state
+                
+0105                                    x_increment:
+0105 23 F1 [07]                                 inc             [ep1_dmabuff1]          ; increment mouse cursor change 
+0107 19 02 [04]                                 mov             A, EVENT_PENDING        ; set event pending to signal data to
+0109 31 34 [05]                                 mov             [event_machine], A      ; send to the host
+010B 81 13 [05]                                 jmp             analyze_y_optics                                        
+010D                                    x_decrement:
+010D 27 F1 [07]                                 dec             [ep1_dmabuff1]          ; decrement mouse cursor change
+010F 19 02 [04]                                 mov             A, EVENT_PENDING        ; set event pending to signal data to
+0111 31 34 [05]                                 mov             [event_machine], A      ; send to the host
+                
+0113                            analyze_y_optics:
+0113 1A 3B [05]                         mov             A, [y_last_state]
+0115 3B    [04]                         asl             A
+0116 3B    [04]                         asl             A
+0117 0E 38 [06]                         or              A, [y_current_state]
+0119 3B    [04]                         asl             A
+011A E9 28 [07]                         jacc    y_jumptable                             ; jump to transition state
+                
+011C                                    y_increment:
+011C 23 F2 [07]                                 inc             [ep1_dmabuff2]          ; increment mouse cursor change 
+011E 19 02 [04]                                 mov             A, EVENT_PENDING        ; set event pending to signal data to
+0120 31 34 [05]                                 mov             [event_machine], A      ; send to the host
+0122 81 2A [05]                                 jmp             analyze_z_optics                                        
+0124                                    y_decrement:
+0124 27 F2 [07]                                 dec             [ep1_dmabuff2]          ; decrement mouse cursor change
+0126 19 02 [04]                                 mov             A, EVENT_PENDING        ; set event pending to signal data to
+0128 31 34 [05]                                 mov             [event_machine], A      ; send to the host
+                
+012A                            analyze_z_optics:
+012A 1A 3C [05]                         mov             A, [z_last_state]
+012C 3B    [04]                         asl             A
+012D 3B    [04]                         asl             A
+012E 0E 39 [06]                         or              A, [z_current_state]
+0130 3B    [04]                         asl             A
+0131 E9 48 [07]                         jacc    z_jumptable                             ; jump to transition state
+                
+0133                                    z_forward:
+0133 19 01 [04]                                 mov             A, 01h
+0135 31 F3 [05]                                 mov             [ep1_dmabuff3], A       ; increment mouse wheel change  
+0137 19 02 [04]                                 mov             A, EVENT_PENDING        ; set event pending to signal data to
+0139 31 34 [05]                                 mov             [event_machine], A      ; send to the host
+013B 81 45 [05]                                 jmp             optic_task_done                                 
+013D                                    z_backward:
+013D 19 FF [04]                                 mov             A, FFh
+013F 31 F3 [05]                                 mov             [ep1_dmabuff3], A       ; decrement mouse wheel change
+0141 19 02 [04]                                 mov             A, EVENT_PENDING        ; set event pending to signal data to
+0143 31 34 [05]                                 mov             [event_machine], A      ; send to the host
+                        
+0145                    optic_task_done:
+0145 1A 37 [05]                 mov             A, [x_current_state]
+0147 31 3A [05]                 mov             [x_last_state], A
+0149 1A 38 [05]                 mov             A, [y_current_state]
+014B 31 3B [05]                 mov             [y_last_state], A
+014D 1A 39 [05]                 mov             A, [z_current_state]
+014F 31 3C [05]                 mov             [z_last_state], A
+                        
+                ; this task sends data out endpoint 1 if the endpoint is configured
+                ; and not set to stall
+                
+0151 1A 34 [05]         mov             A, [event_machine]
+0153 E9 04 [07]         jacc    event_machine_jumptable
+0155                            event_pending:
+                                        ; if not configured then skip data transfer
+0155 1A 28 [05]                         mov             A, [configuration]
+0157 16 01 [05]                         cmp             A, 01h
+0159 B1 7D [05]                         jnz             event_task_done
+                                        ; if stalled then skip data transfer
+015B 1A 2A [05]                         mov             A, [ep1_stall]
+015D 16 FF [05]                         cmp             A, FFh
+015F A1 7D [05]                         jz              event_task_done
+                                        
+                                        ; We have to determine which protocol is currently enabled
+                                        ; and send the format that is supported by that protocol
+0161 1A 2C [05]                         mov             A, [protocol]
+0163 16 01 [05]                         cmp             A, HID_REPORT
+0165 B1 73 [05]                         jnz             boot_protocol_report
+                
+0167                            hid_protocol_report:
+0167 19 04 [04]                         mov             A, 04h                                  ; set endpoint 1 to send 3 bytes
+0169 0E 21 [06]                         or              A, [ep1_data_toggle]
+016B 2A 13 [05]                         iowr    ep1_count
+016D 19 0D [04]                         mov             A, ACK_IN                               ; set to ack on endpoint 1
+016F 2A 14 [05]                         iowr    ep1_mode        
+0171 81 7D [05]                         jmp             event_task_done
+                
+0173                            boot_protocol_report:
+0173 19 03 [04]                         mov             A, 03h                                  ; set endpoint 1 to send 3 bytes
+0175 0E 21 [06]                         or              A, [ep1_data_toggle]
+0177 2A 13 [05]                         iowr    ep1_count
+0179 19 0D [04]                         mov             A, ACK_IN                               ; set to ack on endpoint 1
+017B 2A 14 [05]                         iowr    ep1_mode        
+                
+                
+017D                            event_task_done:
+017D 19 00 [04]                         mov             A, NO_EVENT_PENDING             ; clear pending events
+017F 31 34 [05]                         mov             [event_machine], A 
+0181                            no_event_task:
+                
+                
+0181 80 85 [05]         jmp task_loop
+                
+                
+                ;*******************************************************
+                ;
+                ;       Interrupt handler: Bus_reset
+                ;       Purpose: The program jumps to this routine when
+                ;                the host causes a USB reset.
+                ;
+                ;*******************************************************
+                
+0183            Bus_reset:
+                
+0183 19 03 [04]         mov             A, STALL_IN_OUT                                 ; set to STALL INs&OUTs
+0185 2A 12 [05]         iowr    ep0_mode
+                
+0187 19 80 [04]         mov             A, ADDRESS_ENABLE                               ; enable USB address 0
+0189 2A 10 [05]         iowr    usb_address
+018B 19 00 [04]         mov             A, DISABLE                                              ; disable endpoint1
+018D 2A 14 [05]         iowr    ep1_mode
+                
+018F 19 00 [04]         mov             A, 00h                                                  ; reset program stack pointer
+0191 60    [04]         mov             psp,a   
+                
+0192 80 1B [05]         jmp             Main
+                
+                
+                ;*******************************************************
+                ;
+                ;       Interrupt: 1ms_clear_control
+                ;       Purpose: This interrupt handler sets a flag to indicate
+                ;               it's time to read the buttons in the main task loop,
+                ;               watches for USB suspend, and handles the HID idle
+                ;               timer.
+                ;
+                ;*******************************************************
+                
+0194            1ms_timer:
+0194 2D    [05]         push A
+                
+                
+                        ;**********************************
+                        ; poll buttons for button on/off state
+                
+0195 1A 32 [05]         mov             A, [button_machine]
+0197 16 02 [05]         cmp             A, BUTTON_DATA_PENDING
+0199 A1 C1 [05]         jz              1ms_suspend_timer
+                        
+                                ; if the main task has read the buttons, then we need to re-read the 
+                                ; buttons and set the pending flag
+                
+019B 19 00 [04]                 mov             A, 00h
+019D 31 2F [05]                 mov             [current_button_state], A
+019F                    left_button_read:
+019F 29 00 [05]                 iord    LEFT_BUTTON_PORT
+01A1 10 80 [04]                 and             A, LEFT_BUTTON
+01A3 B1 A9 [05]                 jnz             right_button_read
+01A5 19 01 [04]                         mov             A, HID_LEFT_MOUSE_BUTTON
+01A7 33 2F [07]                         or              [current_button_state], A
+01A9                    right_button_read:
+01A9 29 01 [05]                 iord    RIGHT_BUTTON_PORT
+01AB 10 01 [04]                 and             A, RIGHT_BUTTON
+01AD B1 B3 [05]                 jnz             middle_button_read
+01AF 19 02 [04]                         mov             A, HID_RIGHT_MOUSE_BUTTON 
+01B1 33 2F [07]                         or              [current_button_state], A
+01B3                    middle_button_read:
+01B3 29 01 [05]                 iord    MIDDLE_BUTTON_PORT
+01B5 10 02 [04]                 and             A, MIDDLE_BUTTON
+01B7 B1 BD [05]                 jnz             button_read_done
+01B9 19 04 [04]                         mov             A, HID_MIDDLE_MOUSE_BUTTON
+01BB 33 2F [07]                         or              [current_button_state], A
+01BD                    button_read_done:
+01BD 19 02 [04]                 mov             A, BUTTON_DATA_PENDING
+01BF 31 32 [05]                 mov             [button_machine], A
+                
+                
+                        ;**********************************
+                        ; check for no bus activity/usb suspend
+                
+01C1                    1ms_suspend_timer:
+01C1 29 1F [05]                 iord    usb_status                                      ; read bus activity bit
+01C3 10 08 [04]                 and             A, BUS_ACTIVITY                         ; mask off activity bit
+01C5 B1 F2 [05]                 jnz             bus_activity
+                                        
+01C7 23 20 [07]                 inc             [suspend_count]                         ; increment suspend counter
+01C9 1A 20 [05]                 mov             A, [suspend_count]
+01CB 16 04 [05]                 cmp             A, 04h                                          ; if no bus activity for 3-4ms,
+01CD A1 D1 [05]                 jz              usb_suspend                                     ; then go into low power suspend
+01CF 81 FC [05]                 jmp             idle_timer_handler
+                
+01D1                            usb_suspend:
+                
+                                ;******************************
+                                ; disable unused pins           
+                                ; buttons are already resistively pulled up
+                                ; optics inputs are pulled down by external resistors
+                                ; must turn off LED
+                                ; NOTE - this firmware must change for each pin out 
+                
+01D1 19 C0 [04]                         mov             A, OPTIC_CONTROL | LEFT_BUTTON
+01D3 2A 00 [05]                         iowr    OPTIC_CONTROL_PORT
+                
+                
+                                ; enable wakeup timer interrupt
+01D5 19 81 [04]                         mov             A, (WAKEUP_INT | USB_RESET_INT)
+01D7 2A 20 [05]                         iowr    global_int
+                
+                                ; suspend execution
+01D9 19 09 [04]                         mov             A, (SUSPEND | RUN)              ; set suspend bit
+01DB 72    [04]                         ei
+01DC 2A FF [05]                         iowr    control
+01DE 20    [04]                         nop
+01DF 70    [04]                         di
+                
+                                ; look for bus activity, if none go back into suspend
+01E0 29 1F [05]                         iord    usb_status
+01E2 10 08 [04]                         and             A, BUS_ACTIVITY
+01E4 A1 D1 [05]                         jz              usb_suspend             
+                
+                                ; re-enable the optics in the case of the host wakeup
+01E6 19 80 [04]                         mov             A, LEFT_BUTTON
+01E8 2A 00 [05]                         iowr    OPTIC_CONTROL_PORT
+                
+                
+                                ; re-enable interrupts
+01EA 19 05 [04]                         mov             A, (1MS_INT | USB_RESET_INT)
+01EC 2A 20 [05]                         iowr    global_int
+                
+                                ; reset wakeup timer
+01EE 19 00 [04]                         mov             A, 00h
+01F0 31 41 [05]                         mov             [wakeup_timer], A
+                
+01F2                    bus_activity:
+01F2 19 00 [04]                 mov             A, 00h                                          ; reset suspend counter
+01F4 31 20 [05]                 mov             [suspend_count], A
+01F6 29 1F [05]                 iord    usb_status
+01F8 10 E7 [04]                 and             A, ~(BUS_ACTIVITY | 10h)        ; clear bus activity bit
+01FA 2A 1F [05]                 iowr    usb_status
+                
+                
+                        ;**********************************
+                        ; handle HID SET_IDLE request
+                        
+01FC                    idle_timer_handler:
+01FC 1A 2B [05]                 mov             A, [idle]
+01FE 20    [04]         NOP
+01FF 1F    [04]         XPAGE
+0200 16 00 [05]                 cmp             A, 00h
+0202 A2 20 [05]                 jz              ms_timer_done
+                
+0204 23 3F [07]                 inc             [idle_prescaler]
+0206 1A 3F [05]                 mov             A, [idle_prescaler]
+0208 16 04 [05]                 cmp             A, 04h
+020A A2 0E [05]                 jz              decrement_idle_timer
+020C 82 20 [05]                 jmp             ms_timer_done
+                
+020E                            decrement_idle_timer:
+020E 19 00 [04]                         mov             A, 00h
+0210 31 3F [05]                         mov             [idle_prescaler], A
+0212 27 3E [07]                         dec             [idle_timer]
+0214 A2 18 [05]                         jz              reset_idle_timer
+0216 82 20 [05]                         jmp             ms_timer_done
+0218                                    reset_idle_timer:
+0218 1A 2B [05]                                 mov             A, [idle]
+021A 31 3E [05]                                 mov             [idle_timer], A
+021C 19 02 [04]                                 mov             A, EVENT_PENDING
+021E 31 34 [05]                                 mov             [event_machine], A
+                
+                
+0220                    ms_timer_done:
+0220 2B    [04]                 pop A
+0221 73    [08]                 reti
+                
+                
+                ;*******************************************************
+                ;
+                ;       Interrupt: Endpoint0
+                ;       Purpose: Usb control endpoint handler.  This interrupt
+                ;                       handler formulates responses to SETUP and 
+                ;                       CONTROL READ, and NO-DATA CONTROL transactions. 
+                ;
+                ;*******************************************************
+                
+0222            Endpoint0:
+0222 2E    [05]         push    X
+0223 2D    [05]         push    A
+                
+0224 29 12 [05]         iord    ep0_mode
+0226 10 10 [04]         and             A, EP0_ACK
+0228 A2 35 [05]         jz              ep0_done
+                
+022A 29 12 [05]         iord    ep0_mode
+022C 3B    [04]         asl             A
+022D C2 38 [05]         jc              ep0_setup_received
+022F 3B    [04]         asl             A
+0230 C4 C5 [05]         jc              ep0_in_received
+0232 3B    [04]         asl             A
+0233 C5 1A [05]         jc              ep0_out_received
+0235              ep0_done:
+0235 2B    [04]         pop             A
+0236 2C    [04]         pop             X
+0237 73    [08]         reti
+                
+0238                    ep0_setup_received:
+0238 19 01 [04]                 mov             A, NAK_IN_OUT                           ; clear setup bit to enable
+023A 2A 12 [05]                 iowr    ep0_mode                                        ; writes to EP0 DMA buffer
+                
+                
+023C 1A F8 [05]                 mov             A, [ep0_dmabuff + BMREQUESTTYPE]        ; compact bmRequestType into 5 bit field
+023E 10 E3 [04]                 and             A, E3h                                          ; clear bits 4-3-2, these unused for our purposes
+0240 2D    [05]                 push    A                                                       ; store value
+0241 3C    [04]                 asr             A                                                       ; move bits 7-6-5 into 4-3-2's place
+0242 3C    [04]                 asr             A
+0243 3C    [04]                 asr             A
+0244 31 3D [05]                 mov             [int_temp], A                           ; store shifted value
+0246 2B    [04]                 pop             A                                                       ; get original value
+0247 0E 3D [06]                 or              A, [int_temp]                           ; or the two to get the 5-bit field
+0249 10 1F [04]                 and             A, 1Fh                                          ; clear bits 7-6-5 (asr wraps bit7)
+024B 3B    [04]                 asl             A                                                       ; shift to index jumptable
+024C E7 00 [07]                 jacc    bmRequestType_jumptable         ; jump to handle bmRequestType
+                
+                
+024E                            h2d_std_device:
+024E 1A F9 [05]                         mov             A, [ep0_dmabuff + BREQUEST]
+0250 3B    [04]                         asl             A
+0251 E7 40 [07]                         jacc    h2d_std_device_jumptable
+                
+0253                            h2d_std_interface:      
+0253 1A F9 [05]                         mov             A, [ep0_dmabuff + BREQUEST]
+0255 3B    [04]                         asl             A
+0256 E7 54 [07]                         jacc    h2d_std_interface_jumptable
+                
+0258                            h2d_std_endpoint:
+0258 1A F9 [05]                         mov             A, [ep0_dmabuff + BREQUEST]
+025A 3B    [04]                         asl             A
+025B E7 6C [07]                         jacc    h2d_std_endpoint_jumptable
+                
+025D                            h2d_class_interface:
+025D 1A F9 [05]                         mov             A, [ep0_dmabuff + BREQUEST]
+025F 3B    [04]                         asl             A
+0260 E7 74 [07]                         jacc    h2d_class_interface_jumptable
+                
+0262                            d2h_std_device:
+0262 1A F9 [05]                         mov             A, [ep0_dmabuff + BREQUEST]
+0264 3B    [04]                         asl             A
+0265 E7 8C [07]                         jacc    d2h_std_device_jumptable
+                
+0267                            d2h_std_interface:
+0267 1A F9 [05]                         mov             A, [ep0_dmabuff + BREQUEST]
+0269 3B    [04]                         asl             A
+026A E7 9E [07]                         jacc    d2h_std_interface_jumptable
+                
+026C                            d2h_std_endpoint:
+026C 1A F9 [05]                         mov             A, [ep0_dmabuff + BREQUEST]
+026E 3B    [04]                         asl             A
+026F E7 B4 [07]                         jacc    d2h_std_endpoint_jumptable
+                
+0271                            d2h_class_interface:
+0271 1A F9 [05]                         mov             A, [ep0_dmabuff + BREQUEST]
+0273 3B    [04]                         asl             A
+0274 E7 CE [07]                         jacc    d2h_class_interface_jumptable
+                
+                
+                        ;;************ DEVICE REQUESTS **************
+                
+0276                    clear_device_feature:                                   ; CLEAR FEATURE
+0276 1A FA [05]                 mov             A, [ep0_dmabuff + WVALUELO]
+0278 16 01 [05]                 cmp             A, DEVICE_REMOTE_WAKEUP
+027A B4 BC [05]                 jnz             request_not_supported           
+027C 19 00 [04]                 mov             A, 00h                                          ; disable remote wakeup capability
+027E 31 29 [05]                 mov             [remote_wakeup], A
+0280 19 02 [04]                 mov             A, NO_CHANGE_PENDING
+0282 31 27 [05]                 mov             [ep0_in_flag], A
+0284 84 B1 [05]                 jmp             initialize_no_data_control
+                
+0286                    set_device_feature:                                             ; SET FEATURE
+0286 1A FA [05]                 mov             A, [ep0_dmabuff + WVALUELO]
+0288 16 01 [05]                 cmp             A, DEVICE_REMOTE_WAKEUP
+028A B4 BC [05]                 jnz             request_not_supported           
+028C 19 FF [04]                 mov             A, FFh                                          ; enable remote wakeup capability
+028E 31 29 [05]                 mov             [remote_wakeup], A
+0290 19 02 [04]                 mov             A, NO_CHANGE_PENDING
+0292 31 27 [05]                 mov             [ep0_in_flag], A
+0294 84 B1 [05]                 jmp             initialize_no_data_control
+                
+0296                    set_device_address:                                             ; SET ADDRESS
+0296 19 00 [04]                 mov             A, ADDRESS_CHANGE_PENDING       ; set flag to indicate we
+0298 31 27 [05]                 mov             [ep0_in_flag], A                        ; need to change address on
+029A 1A FA [05]                 mov             A, [ep0_dmabuff + WVALUELO]
+029C 31 35 [05]                 mov             [pending_data], A
+029E 84 B1 [05]                 jmp             initialize_no_data_control
+                
+02A0                    set_device_configuration:                               ; SET CONFIGURATION
+02A0 1A FA [05]                 mov             A, [ep0_dmabuff + WVALUELO]
+02A2 16 01 [05]                 cmp             A, 01h
+02A4 A2 B2 [05]                 jz              configure_device
+02A6                            unconfigure_device:                                     ; set device as unconfigured
+02A6 31 28 [05]                         mov             [configuration], A
+02A8 19 00 [04]                         mov             A, DISABLE                              ; disable endpoint 1
+02AA 2A 14 [05]                         iowr    ep1_mode
+02AC 19 01 [04]                         mov     A, EP0_INT                              ; turn off endpoint 1 interrupts
+02AE 2A 21 [05]                         iowr    endpoint_int
+02B0 82 D2 [05]                         jmp             set_device_configuration_done
+02B2                            configure_device:                                       ; set device as configured
+02B2 31 28 [05]                         mov             [configuration], A
+                
+02B4 1A 2A [05]                         mov             A, [ep1_stall]                  ; if endpoint 1 is stalled
+02B6 10 FF [04]                         and             A, FFh
+02B8 A2 C0 [05]                         jz              ep1_nak_in_out
+02BA 19 03 [04]                                 mov             A, STALL_IN_OUT         ; set endpoint 1 mode to stall
+02BC 2A 14 [05]                                 iowr    ep1_mode
+02BE 82 C4 [05]                                 jmp             ep1_set_int
+02C0                                    ep1_nak_in_out:
+02C0 19 01 [04]                                 mov             A, NAK_IN_OUT           ; otherwise set it to NAK in/out
+02C2 2A 14 [05]                                 iowr    ep1_mode
+02C4                                    ep1_set_int:
+02C4 19 03 [04]                         mov     A, EP0_INT | EP1_INT    ; enable endpoint 1 interrupts          
+02C6 2A 21 [05]                         iowr    endpoint_int
+02C8 19 00 [04]                         mov             A, 00h
+02CA 31 21 [05]                         mov             [ep1_data_toggle], A    ; reset the data toggle
+02CC 31 F0 [05]                         mov             [ep1_dmabuff0], A               ; reset endpoint 1 fifo values
+02CE 31 F1 [05]                         mov             [ep1_dmabuff1], A
+02D0 31 F2 [05]                         mov             [ep1_dmabuff2], A
+02D2                                    set_device_configuration_done:
+02D2 19 02 [04]                         mov             A, NO_CHANGE_PENDING
+02D4 31 27 [05]                         mov             [ep0_in_flag], A
+02D6 84 B1 [05]                         jmp             initialize_no_data_control
+                
+                
+02D8                    get_device_status:                                              ; GET STATUS
+02D8 19 02 [04]                 mov             A, DEVICE_STATUS_LENGTH
+02DA 31 25 [05]                 mov             [maximum_data_count], A
+02DC 1A 29 [05]                 mov             A, [remote_wakeup]                      ; test remote wakeup status
+02DE 10 FF [04]                 and             A, FFh
+02E0 A2 E8 [05]                 jz              remote_wakeup_disabled
+02E2                            remote_wakeup_enabled:                          ; send remote wakeup enabled status
+02E2 19 7C [04]                         mov             A, (device_status_wakeup_enabled - control_read_table)
+02E4 31 23 [05]                         mov             [data_start], A
+02E6 84 88 [05]                         jmp             initialize_control_read
+02E8                            remote_wakeup_disabled:                         ; send remote wakeup disabled status
+02E8 19 7E [04]                         mov             A, (device_status_wakeup_disabled - control_read_table)
+02EA 31 23 [05]                         mov             [data_start], A
+02EC 84 88 [05]                         jmp             initialize_control_read
+                                
+                
+02EE                    get_device_descriptor:                                  ; GET DESCRIPTOR
+02EE 1A FB [05]                 mov             A, [ep0_dmabuff + WVALUEHI]
+02F0 3B    [04]                 asl             A
+02F1 E7 E6 [07]                 jacc    get_device_descriptor_jumptable
+                
+02F3                            send_device_descriptor:
+02F3 19 00 [04]                         mov             A, 00h
+02F5 F8 00 [14]                         index   device_desc_table        
+02F7 31 25 [05]                         mov             [maximum_data_count], A
+02F9 19 00 [04]                         mov             A, (device_desc_table - control_read_table)
+02FB 31 23 [05]                         mov             [data_start], A
+02FD 84 88 [05]                         jmp             initialize_control_read
+                
+02FF                            send_configuration_descriptor:
+02FF 1F    [04]         XPAGE
+0300 19 02 [04]                         mov             A, 02h
+0302 F8 12 [14]                         index   config_desc_table:
+0304 31 25 [05]                         mov             [maximum_data_count], A
+0306 19 12 [04]                         mov             A, (config_desc_table - control_read_table)
+0308 31 23 [05]                         mov             [data_start], A
+030A 84 88 [05]                         jmp             initialize_control_read
+                
+030C                            send_string_descriptor:
+030C 1A FA [05]                         mov             A, [ep0_dmabuff + WVALUELO]
+030E 3B    [04]                         asl             A
+030F E7 F2 [07]                         jacc    string_jumptable:
+                
+0311                                    language_string:
+0311 19 00 [04]                                 mov             A, 00h
+0313 F8 8B [14]                                 index   ilanguage_string
+0315 31 25 [05]                                 mov             [maximum_data_count], A
+0317 19 8B [04]                                 mov             A, (ilanguage_string - control_read_table)
+0319 31 23 [05]                                 mov             [data_start], A
+031B 84 88 [05]                                 jmp             initialize_control_read
+                
+031D                                    manufacturer_string:
+031D 19 00 [04]                                 mov             A, 00h
+031F F8 8F [14]                                 index   imanufacturer_string
+0321 31 25 [05]                                 mov             [maximum_data_count], A
+0323 19 8F [04]                                 mov             A, (imanufacturer_string - control_read_table)
+0325 31 23 [05]                                 mov             [data_start], A
+0327 84 88 [05]                                 jmp             initialize_control_read
+                
+0329                                    product_string:
+0329 19 00 [04]                                 mov             A, 00h
+032B F8 AB [14]                                 index   iproduct_string
+032D 31 25 [05]                                 mov             [maximum_data_count], A
+032F 19 AB [04]                                 mov             A, (iproduct_string - control_read_table)
+0331 31 23 [05]                                 mov             [data_start], A
+0333 84 88 [05]                                 jmp             initialize_control_read
+                
+0335                                    configuration_string:
+0335 19 00 [04]                                 mov             A, 00h
+0337 F8 D3 [14]                                 index   iconfiguration_string
+0339 31 25 [05]                                 mov             [maximum_data_count], A
+033B 19 D3 [04]                                 mov             A, (iconfiguration_string - control_read_table)
+033D 31 23 [05]                                 mov             [data_start], A
+033F 84 88 [05]                                 jmp             initialize_control_read
+                
+0341                            send_interface_descriptor:
+0341 19 00 [04]                         mov             A, 00h
+0343 F8 1B [14]                         index   interface_desc_table
+0345 31 25 [05]                         mov             [maximum_data_count], A
+0347 19 1B [04]                         mov             A, (interface_desc_table - control_read_table)
+0349 31 23 [05]                         mov             [data_start], A
+034B 84 88 [05]                         jmp             initialize_control_read
+                
+034D                            send_endpoint_descriptor:
+034D 19 00 [04]                         mov             A, 00h
+034F F8 2D [14]                         index   endpoint_desc_table
+0351 31 25 [05]                         mov             [maximum_data_count], A
+0353 19 2D [04]                         mov             A, (endpoint_desc_table - control_read_table)
+0355 31 23 [05]                         mov             [data_start], A
+0357 84 88 [05]                         jmp             initialize_control_read
+                
+                
+0359                            get_device_configuration:                               ; GET CONFIGURATION
+0359 19 01 [04]                         mov             A, DEVICE_CONFIG_LENGTH
+035B 31 25 [05]                         mov             [maximum_data_count], A
+035D 1A 28 [05]                         mov             A, [configuration]                      ; test configuration status
+035F 10 FF [04]                         and             A, FFh
+0361 A3 69 [05]                         jz              device_unconfigured
+0363                                    device_configured:                                      ; send configured status
+0363 19 80 [04]                                 mov             A, (device_configured_table - control_read_table)
+0365 31 23 [05]                                 mov             [data_start], A
+0367 84 88 [05]                                 jmp             initialize_control_read
+0369                                    device_unconfigured:                            ; send unconfigured status
+0369 19 81 [04]                                 mov             A, (device_unconfigured_table - control_read_table)
+036B 31 23 [05]                                 mov             [data_start], A
+036D 84 88 [05]                                 jmp             initialize_control_read
+                
+                
+                        ;;************ INTERFACE REQUESTS ***********
+                
+036F                    set_interface_interface:                                ; SET INTERFACE
+036F 1A FA [05]                 mov             A, [ep0_dmabuff + WVALUELO]
+0371 16 00 [05]                 cmp             A, 00h                                          ; there are no alternate interfaces
+0373 A3 77 [05]                 jz              alternate_supported                     ; for this device
+0375                            alternate_not_supported:                        ; if the host requests any other
+0375 84 BC [05]                         jmp             request_not_supported   ; alternate than 0, stall.      
+0377                            alternate_supported:
+0377 19 02 [04]                         mov             A, NO_CHANGE_PENDING
+0379 31 27 [05]                         mov             [ep0_in_flag], A
+037B 84 B1 [05]                         jmp             initialize_no_data_control
+                
+                
+037D                    get_interface_status:                                   ; GET STATUS
+037D 19 02 [04]                 mov             A, INTERFACE_STATUS_LENGTH
+037F 31 25 [05]                 mov             [maximum_data_count], A
+0381 19 86 [04]                 mov             A, (interface_status_table - control_read_table)
+0383 31 23 [05]                 mov             [data_start], A
+0385 84 88 [05]                 jmp             initialize_control_read
+                                
+                
+0387                    get_interface_interface:                                ; GET INTERFACE
+0387 19 01 [04]                 mov             A, INTERFACE_ALTERNATE_LENGTH
+0389 31 25 [05]                 mov             [maximum_data_count], A
+038B 19 88 [04]                 mov             A, (interface_alternate_table - control_read_table)
+038D 31 23 [05]                 mov             [data_start], A
+038F 84 88 [05]                 jmp             initialize_control_read
+                
+                
+0391                    set_interface_idle:                                             ; SET IDLE
+0391 1A FB [05]                 mov             A, [ep0_dmabuff + WVALUEHI]                             ; test if new idle time 
+0393 16 00 [05]                 cmp             A, 00h                                          ; disables idle timer
+0395 A3 A5 [05]                 jz              idle_timer_disable
+                
+0397 1A 3E [05]                 mov             A, [idle_timer]                         ; test if less than 4ms left
+0399 16 01 [05]                 cmp             A, 01h
+039B A3 A9 [05]                 jz              set_idle_last_not_expired
+                
+039D 1A FB [05]                 mov             A, [ep0_dmabuff + WVALUEHI]                             ; test if time left less than
+039F 08 3E [06]                 sub             A, [idle_timer]                         ; new idle value
+03A1 D3 B9 [05]                 jnc             set_idle_new_timer_less
+                
+03A3 83 C5 [05]                 jmp             set_idle_normal
+                
+03A5                            idle_timer_disable:
+03A5 31 2B [05]                         mov             [idle], A                               ; disable idle timer
+03A7 83 CF [05]                         jmp             set_idle_done
+                
+03A9                            set_idle_last_not_expired:
+03A9 19 02 [04]                         mov             A, EVENT_PENDING                ; send report immediately
+03AB 31 34 [05]                         mov             [event_machine], A
+03AD 19 00 [04]                         mov             A, 00h                                  ; reset idle prescaler
+03AF 31 3F [05]                         mov             [idle_prescaler], A
+03B1 1A FB [05]                         mov             A, [ep0_dmabuff + WVALUEHI]                     ; set new idle value
+03B3 31 3E [05]                         mov             [idle_timer], A
+03B5 31 2B [05]                         mov             [idle], A
+03B7 83 CF [05]                         jmp             set_idle_done
+                
+03B9                            set_idle_new_timer_less:                        
+03B9 19 00 [04]                         mov             A, 00h
+03BB 31 3F [05]                         mov             [idle_prescaler], A             ; reset idle prescaler
+03BD 1A FB [05]                         mov             A, [ep0_dmabuff + WVALUEHI]
+03BF 31 3E [05]                         mov             [idle_timer], A                 ; update idle time value
+03C1 31 2B [05]                         mov             [idle], A
+03C3 83 CF [05]                         jmp             set_idle_done
+                
+03C5                            set_idle_normal:
+03C5 19 00 [04]                         mov             A, 00h                                  ; reset idle prescaler
+03C7 31 3F [05]                         mov             [idle_prescaler], A
+03C9 1A FB [05]                         mov             A, [ep0_dmabuff + WVALUEHI]                     ; update idle time value
+03CB 31 3E [05]                         mov             [idle_timer], A
+03CD 31 2B [05]                         mov             [idle], A
+                
+03CF                            set_idle_done:
+03CF 19 02 [04]                         mov             A, NO_CHANGE_PENDING    ; respond with no-data control
+03D1 31 27 [05]                         mov             [ep0_in_flag], A                ; transaction
+03D3 84 B1 [05]                         jmp             initialize_no_data_control
+                
+                
+03D5                    set_interface_protocol:                                 ; SET PROTOCOL
+03D5 1A FA [05]                 mov             A, [ep0_dmabuff + WVALUELO]
+03D7 31 2C [05]                 mov             [protocol], A                           ; set protocol value
+03D9 19 02 [04]                 mov             A, NO_CHANGE_PENDING
+03DB 31 27 [05]                 mov             [ep0_in_flag], A                        ; respond with no-data control
+03DD 84 B1 [05]                 jmp             initialize_no_data_control      ; transaction
+                
+                
+03DF                    get_interface_report:                                   ; GET REPORT
+03DF 19 80 [04]                 mov             A, DATA_TOGGLE                          ; set data toggle to DATA ONE
+03E1 31 22 [05]                 mov             [ep0_data_toggle], A
+03E3 19 01 [04]                 mov             A, NAK_IN_OUT                           ; clear setup bit to write to
+03E5 2A 12 [05]                 iowr    ep0_mode                                        ; endpoint fifo
+                
+03E7 1A F0 [05]                 mov             A, [ep1_dmabuff0]                       ; copy over button data
+03E9 31 F8 [05]                 mov             [ep0_dmabuff0], A
+                
+03EB 1A F1 [05]                 mov             A, [ep1_dmabuff1]                       ; copy horizontal data
+03ED 31 F9 [05]                 mov             [ep0_dmabuff1], A
+                
+03EF 1A F2 [05]                 mov             A, [ep1_dmabuff2]                       ; copy vertical data
+03F1 31 FA [05]                 mov             [ep0_dmabuff2], A
+                
+03F3 19 02 [04]                 mov             A, TRANS_CONTROL_READ
+03F5 31 40 [05]                 mov             [ep0_transtype], A
+03F7 19 02 [04]                 mov             A, CONTROL_READ_DATA            ; set state machine state
+03F9 31 26 [05]                 mov             [ep0_in_machine], A                     
+03FB 1C 03 [04]                 mov             X, 03h                                          ; set number of byte to transfer to 3
+03FD 84 E5 [05]                 jmp             dmabuffer_load_done                     ; jump to finish transfer
+                                
+                        
+03FF                    get_interface_idle:                                             ; GET IDLE
+03FF 1F    [04]         XPAGE
+0400 19 80 [04]                 mov             A, DATA_TOGGLE                          ; set data toggle to DATA ONE
+0402 31 22 [05]                 mov             [ep0_data_toggle], A
+0404 19 01 [04]                 mov             A, NAK_IN_OUT                           ; clear setup bit to write to
+0406 2A 12 [05]                 iowr    ep0_mode                                        ; endpoint fifo
+                
+0408 1A 2B [05]                 mov             A, [idle]                                       ; copy over idle time
+040A 31 F8 [05]                 mov             [ep0_dmabuff0], A
+                
+040C 19 02 [04]                 mov             A, TRANS_CONTROL_READ
+040E 31 40 [05]                 mov             [ep0_transtype], A
+0410 19 02 [04]                 mov             A, CONTROL_READ_DATA            ; set state machine state
+0412 31 26 [05]                 mov             [ep0_in_machine], A                     
+0414 1C 01 [04]                 mov             X, 01h                                          ; set number of byte to transfer to 3
+0416 84 E5 [05]                 jmp             dmabuffer_load_done                     ; jump to finish transfer
+                
+                        
+0418                    get_interface_protocol:                                 ; GET PROTOCOL
+0418 19 01 [04]                 mov             A, INTERFACE_PROTOCOL_LENGTH
+041A 31 25 [05]                 mov             [maximum_data_count], A         ; get offset of device descriptor table
+041C 1A 2C [05]                 mov             A, [protocol]
+041E 10 01 [04]                 and             A, 01h
+0420 A4 28 [05]                 jz              boot_protocol
+0422                            report_protocol:
+0422 19 8A [04]                         mov             A, (interface_report_protocol - control_read_table)
+0424 31 23 [05]                         mov             [data_start], A
+0426 84 88 [05]                         jmp             initialize_control_read ; get ready to send data
+0428                            boot_protocol:
+0428 19 89 [04]                         mov             A, (interface_boot_protocol - control_read_table)
+042A 31 23 [05]                         mov             [data_start], A
+042C 84 88 [05]                         jmp             initialize_control_read ; get ready to send data
+                
+                
+042E                    get_interface_hid:                                              ; GET HID REPORT DESCRIPTOR
+042E 1A FB [05]                 mov             A, [ep0_dmabuff + WVALUEHI]
+0430 16 22 [05]                 cmp             A, 22h                                          ; test if report request
+0432 A4 46 [05]                 jz              get_hid_report_desc
+0434 16 21 [05]                 cmp             A, 21h                                          ; test if class request
+0436 A4 3A [05]                 jz              get_hid_desc
+0438 84 BC [05]                 jmp             request_not_supported
+                
+043A                            get_hid_desc:
+043A 19 00 [04]                 mov             A, 00h
+043C F8 24 [14]                 index   hid_desc_table  
+043E 31 25 [05]                 mov             [maximum_data_count], A         ; get offset of device descriptor table
+0440 19 24 [04]                 mov             A, (hid_desc_table - control_read_table)
+0442 31 23 [05]                 mov             [data_start], A
+0444 84 88 [05]                 jmp             initialize_control_read         ; get ready to send data
+                
+0446                            get_hid_report_desc:
+0446 19 07 [04]                 mov             A, 07h
+0448 F8 24 [14]                 index   hid_desc_table          
+044A 31 25 [05]                 mov             [maximum_data_count], A         ; get offset of device descriptor table
+044C 19 34 [04]                 mov             A, (hid_report_desc_table - control_read_table)
+044E 31 23 [05]                 mov             [data_start], A
+0450 84 88 [05]                 jmp             initialize_control_read         ; get ready to send data
+                
+                
+                        ;;************ ENDPOINT REQUESTS ************
+                
+0452                    clear_endpoint_feature:                                 ; CLEAR FEATURE
+0452 1A FA [05]                 mov             A, [ep0_dmabuff + WVALUELO]
+0454 16 00 [05]                 cmp             A, ENDPOINT_STALL
+0456 B4 BC [05]                 jnz             request_not_supported           
+0458 19 00 [04]                 mov             A, 00h                                          ; clear endpoint 1 stall
+045A 31 2A [05]                 mov             [ep1_stall], A
+045C 19 02 [04]                 mov             A, NO_CHANGE_PENDING            ; respond with no-data control
+045E 31 27 [05]                 mov             [ep0_in_flag], A
+0460 84 B1 [05]                 jmp             initialize_no_data_control
+                
+0462                    set_endpoint_feature:                                   ; SET FEATURE
+0462 1A FA [05]                 mov             A, [ep0_dmabuff + WVALUELO]
+0464 16 00 [05]                 cmp             A, ENDPOINT_STALL
+0466 B4 BC [05]                 jnz             request_not_supported           
+0468 19 FF [04]                 mov             A, FFh                                          ; stall endpoint 1
+046A 31 2A [05]                 mov             [ep1_stall], A
+046C 19 02 [04]                 mov             A, NO_CHANGE_PENDING            ; respond with no-data control
+046E 31 27 [05]                 mov             [ep0_in_flag], A
+0470 84 B1 [05]                 jmp             initialize_no_data_control
+                
+0472                    get_endpoint_status:                                    ; GET STATUS
+0472 19 02 [04]                 mov             A, ENDPOINT_STALL_LENGTH
+0474 31 25 [05]                 mov             [maximum_data_count], A
+0476 1A 2A [05]                 mov             A, [ep1_stall]                          ; test if endpoint 1 stalled
+0478 10 FF [04]                 and             A, FFh
+047A B4 82 [05]                 jnz             endpoint_stalled
+047C                            endpoint_not_stalled:                           ; send no-stall status
+047C 19 82 [04]                         mov             A, (endpoint_nostall_table - control_read_table)
+047E 31 23 [05]                         mov             [data_start], A
+0480 84 88 [05]                         jmp             initialize_control_read
+0482                            endpoint_stalled:                                       ; send stall status
+0482 19 84 [04]                         mov             A, (endpoint_stall_table - control_read_table)
+0484 31 23 [05]                         mov             [data_start], A
+0486 84 88 [05]                         jmp             initialize_control_read
+                                
+                
+                ;;***************** CONTROL READ TRANSACTION **************
+                
+0488                    initialize_control_read:
+0488 19 02 [04]                 mov             A, TRANS_CONTROL_READ           ; set transaction type to control read
+048A 31 40 [05]                 mov             [ep0_transtype], A
+                
+048C 19 80 [04]                 mov             A, DATA_TOGGLE                          ; set data toggle to DATA ONE
+048E 31 22 [05]                 mov             [ep0_data_toggle], A
+                
+                                ; if wLengthhi == 0
+0490 1A FF [05]                 mov             A, [ep0_dmabuff + WLENGTHHI]                            ; find lesser of requested and maximum
+0492 16 00 [05]                 cmp             A, 00h
+0494 B4 A0 [05]                 jnz             initialize_control_read_done
+                                ; and wLengthlo < maximum_data_count
+0496 1A FE [05]                 mov             A, [ep0_dmabuff + WLENGTHLO]                            ; find lesser of requested and maximum
+0498 17 25 [07]                 cmp             A, [maximum_data_count]         ; response lengths
+049A D4 A0 [05]                 jnc             initialize_control_read_done
+                                ; then maximum_data_count >= wLengthlo
+049C 1A FE [05]                 mov             A, [ep0_dmabuff + WLENGTHLO]
+049E 31 25 [05]                 mov             [maximum_data_count], A
+04A0                            initialize_control_read_done:
+04A0 84 C9 [05]                         jmp             control_read_data_stage ; send first packet
+                
+                
+                ;;***************** CONTROL WRITE TRANSACTION *************
+                
+04A2                    initialize_control_write:
+04A2 19 04 [04]                 mov             A, TRANS_CONTROL_WRITE          ; set transaction type to control write
+04A4 31 40 [05]                 mov             [ep0_transtype], A
+                
+04A6 19 80 [04]                 mov             A, DATA_TOGGLE                          ; set accepted data toggle
+04A8 31 22 [05]                 mov             [ep0_data_toggle], A
+04AA 19 0B [04]                 mov             A, ACK_OUT_NAK_IN                       ; set mode
+04AC 2A 12 [05]                 iowr    ep0_mode
+04AE 2B    [04]                 pop             A
+04AF 2C    [04]                 pop             X
+04B0 73    [08]                 reti
+                
+                
+                ;;***************** NO DATA CONTROL TRANSACTION ***********
+                
+04B1                    initialize_no_data_control:
+04B1 19 06 [04]                 mov             A, TRANS_NO_DATA_CONTROL        ; set transaction type to no data control
+04B3 31 40 [05]                 mov             [ep0_transtype], A
+                
+04B5 19 06 [04]                 mov             A, STATUS_IN_ONLY                       ; set SIE for STATUS IN mode
+04B7 2A 12 [05]                 iowr    ep0_mode
+04B9 2B    [04]                 pop             A
+04BA 2C    [04]                 pop             X
+04BB 73    [08]                 reti
+                
+                
+                ;;***************** UNSUPPORTED TRANSACTION ***************
+                
+04BC                    request_not_supported:
+04BC 29 12 [05]                 iord    ep0_mode
+04BE 19 03 [04]                 mov             A, STALL_IN_OUT                                 ; send a stall to indicate that the request
+04C0 2A 12 [05]                 iowr    ep0_mode                                        ; is not supported
+04C2 2B    [04]                 pop             A
+04C3 2C    [04]                 pop             X
+04C4 73    [08]                 reti
+                
+                
+                ;**********************************************************
+                
+                        ;**********************************
+                        ; IN - CONTROL READ DATA STAGE
+                        ;        - CONTROL WRITE STATUS STAGE
+                        ;        - NO DATA CONTROL STATUS STAGE
+                
+04C5                    ep0_in_received:
+04C5 1A 40 [05]         mov             A, [ep0_transtype]
+04C7 E7 D6 [07]         jacc    ep0_in_jumptable
+                
+                
+                        ;**********************************
+                
+04C9                    control_read_data_stage:
+04C9 1C 00 [04]                 mov             X, 00h
+                
+04CB 1A 25 [05]                 mov             A, [maximum_data_count]
+04CD 16 00 [05]                 cmp             A, 00h                                          ; has all been sent
+04CF A4 E5 [05]                 jz              dmabuffer_load_done                     
+                
+04D1                            dmabuffer_load:
+04D1 40    [04]                         mov             A, X                                    ; check if 8 byte ep0 dma
+04D2 16 08 [05]                         cmp             A, 08h                                  ; buffer is full
+04D4 A4 E5 [05]                         jz              dmabuffer_load_done
+                
+04D6 1A 23 [05]                         mov             A, [data_start]                 ; read data from desc. table
+04D8 F8 00 [14]                         index   control_read_table
+04DA 32 F8 [06]                         mov             [X + ep0_dmabuff0], A
+                
+04DC 22    [04]                         inc             X                                               ; increment buffer offset
+04DD 23 23 [07]                         inc             [data_start]                    ; increment descriptor table pointer
+04DF 27 25 [07]                         dec             [maximum_data_count]    ; decrement number of bytes requested
+04E1 A4 E5 [05]                         jz              dmabuffer_load_done
+04E3 84 D1 [05]                         jmp             dmabuffer_load                  ; loop to load more data
+04E5                                    dmabuffer_load_done:
+                        
+04E5 29 11 [05]                 iord    ep0_count                                       ; unlock counter register
+04E7 40    [04]                 mov             A, X                                            ; find number of bytes loaded
+04E8 0E 22 [06]                 or              A, [ep0_data_toggle]            ; or data toggle
+04EA 2A 11 [05]                 iowr    ep0_count                                       ; write ep0 count register
+                
+04EC 19 0F [04]                 mov             A, ACK_IN_STATUS_OUT            ; set endpoint mode to ack next IN
+04EE 2A 12 [05]                 iowr    ep0_mode                                        ; or STATUS OUT
+                                        
+04F0 19 80 [04]                 mov             A, DATA_TOGGLE                          ; toggle data toggle
+04F2 37 22 [07]                 xor             [ep0_data_toggle], A
+                
+04F4 2B    [04]                 pop             A
+04F5 2C    [04]                 pop             X
+04F6 73    [08]                 reti
+                
+                
+                        ;**********************************
+                
+04F7                    control_write_status_stage:
+04F7 19 06 [04]                 mov             A, STATUS_IN_ONLY
+04F9 2A 12 [05]                 iowr    ep0_mode
+                
+04FB 19 00 [04]                 mov             A, TRANS_NONE
+04FD 31 40 [05]                 mov             [ep0_transtype], A
+                
+04FF 1F    [04]         XPAGE
+0500 2B    [04]                 pop             A
+0501 2C    [04]                 pop             X
+0502 73    [08]                 reti
+                
+                
+                        ;**********************************
+                
+0503                    no_data_control_status_stage:
+0503 1A 27 [05]                 mov             A, [ep0_in_flag]                ; end of no-data control transaction 
+0505 16 00 [05]                 cmp             A, ADDRESS_CHANGE_PENDING
+0507 B5 0F [05]                 jnz             no_data_status_done
+                
+0509                            change_address:
+0509 1A 35 [05]                         mov             A, [pending_data]       ; change the device address if this
+050B 0D 80 [04]                         or              A, ADDRESS_ENABLE       ; data is pending
+050D 2A 10 [05]                         iowr    usb_address
+                
+050F                            no_data_status_done:                    ; otherwise set to stall in/out until
+050F 19 03 [04]                         mov             A, STALL_IN_OUT         ; a new setup
+0511 2A 12 [05]                         iowr    ep0_mode
+                
+0513 19 00 [04]                         mov             A, TRANS_NONE
+0515 31 40 [05]                         mov             [ep0_transtype], A
+                
+0517 2B    [04]                         pop             A
+0518 2C    [04]                         pop             X
+0519 73    [08]                         reti
+                
+                
+                ;**********************************************************
+                
+                        ;**********************************
+                        ; OUT - CONTROL READ STATUS STAGE
+                        ;         - CONTROL WRITE DATA STAGE
+                        ;         - ERROR DURING NO DATA CONTROL TRANSACTION
+                
+051A                    ep0_out_received:
+051A 1A 40 [05]         mov             A, [ep0_transtype]
+051C E7 DE [07]         jacc    ep0_out_jumptable
+                
+                        
+                        ;**********************************
+                
+051E                    control_read_status_stage:
+051E 19 02 [04]                 mov             A, STATUS_OUT_ONLY
+0520 2A 12 [05]                 iowr    ep0_mode
+                
+0522 19 00 [04]                 mov             A, TRANS_NONE
+0524 31 40 [05]                 mov             [ep0_transtype], A
+                
+0526 2B    [04]                 pop             A
+0527 2C    [04]                 pop             X
+0528 73    [08]                 reti    
+                
+                
+                        ;**********************************
+                
+0529                    control_write_data_stage:
+0529 19 11 [04]                 mov             A, ep0_count                                    ; check that data is valid
+052B 10 40 [04]                 and             A, DATA_VALID
+052D A5 3B [05]                 jz              control_write_data_stage_done
+                
+052F 29 11 [05]                 iord    ep0_count                                               ; check for correct data toggle
+0531 10 80 [04]                 and             A, DATA_TOGGLE
+0533 14 22 [06]                 xor             A, [ep0_data_toggle]
+0535 B5 3B [05]                 jnz             control_write_data_stage_done
+                
+                                ; get data and transfer it to a buffer here
+                
+                
+0537 19 80 [04]                 mov             A, DATA_TOGGLE
+0539 37 22 [07]                 xor             [ep0_data_toggle], A
+                
+053B                            control_write_data_stage_done:
+053B 2B    [04]                 pop             A
+053C 2C    [04]                 pop             X
+053D 73    [08]                 reti
+                
+                                
+                        ;**********************************
+                
+053E                    no_data_control_error:  
+053E 19 03 [04]                 mov             A, STALL_IN_OUT
+0540 2A 12 [05]                 iowr    ep0_mode
+                
+0542 19 00 [04]                 mov             A, TRANS_NONE
+0544 31 40 [05]                 mov             [ep0_transtype], A
+                
+0546 2B    [04]                 pop             A
+0547 2C    [04]                 pop             X
+0548 73    [08]                 reti
+                
+                        
+                ;*******************************************************
+                ;
+                ;       Interrupt handler: Endpoint1
+                ;       Purpose: This interrupt routine handles the specially
+                ;                reserved data endpoint 1 (for a mouse).  This
+                ;                interrupt happens every time a host sends an
+                ;                IN on endpoint 1.  The data to send (NAK or 3
+                ;                byte packet) is already loaded, so this routine
+                ;                just prepares the dma buffers for the next packet
+                ;
+                ;*******************************************************
+                
+0549            Endpoint1:
+0549 2D    [05]         push    A
+                
+054A 29 14 [05]         iord    ep1_mode                                                ; if the interrupt was caused by
+054C 10 10 [04]         and     A, EP_ACK                                                       ; a NAK or STALL, then just set
+054E A5 5C [05]         jz      endpoint1_set_response                          ; response and return
+                
+                        ;**********************************
+                        ; change data toggle
+0550 19 80 [04]         mov             A, 80h
+0552 37 21 [07]         xor             [ep1_data_toggle], A
+                
+                        ;**********************************
+                        ; clear endpoint variables
+0554 19 00 [04]         mov             A, 00h                                                  ; clear x,y,z cursor change values
+0556 31 F1 [05]         mov             [ep1_dmabuff1], A
+0558 31 F2 [05]         mov             [ep1_dmabuff2], A
+055A 31 F3 [05]         mov             [ep1_dmabuff3], A
+                
+                        ;**********************************
+                        ; set response
+055C                    endpoint1_set_response:
+055C 1A 2A [05]         mov             A, [ep1_stall]                                  ; if endpoint is set to stall, then set
+055E 16 FF [05]         cmp             A, FFh                                                  ; mode to stall
+0560 B5 68 [05]         jnz             endpoint1_nak
+0562 19 03 [04]                 mov             A, STALL_IN_OUT
+0564 2A 14 [05]                 iowr    ep1_mode
+0566 85 6C [05]                 jmp     endpoint1_done
+0568                    endpoint1_nak:
+0568 19 0C [04]                 mov     A, NAK_IN                                               ; clear the ACK and STALL bits
+056A 2A 14 [05]                 iowr    ep1_mode
+                
+056C                    endpoint1_done:
+056C 2B    [04]                 pop             A
+056D 73    [08]                 reti
+                
+                
+                ;*******************************************************
+                ;
+                ;       Interrupt: Wakeup
+                ;       Purpose:   This interrupt happens during USB suspend
+                ;                       when the microcontroller wakes up due to the
+                ;                       internal wakeup timer.  The buttons and optics
+                ;                       are then polled for any change in state.  If
+                ;                       a change occurs then a wakeup/resume signal
+                ;                       is forced on the bus by this microcontroller.
+                ;
+                ;*******************************************************
+                
+056E            Wakeup:
+056E 2D    [05]         push    A
+                
+                        ;**********************************
+                        ; reset watchdog
+056F 2A 26 [05]         iowr    watchdog
+                
+                        ;**********************************
+                        ; test if remote wakeup is enabled
+0571 1A 29 [05]         mov             A, [remote_wakeup]
+0573 16 00 [05]         cmp             A, 00h
+0575 A6 2E [05]         jz              wakeup_done
+                
+                
+                        ;**********************************
+                        ; wait for a couple wakeup times to pass
+                        ; some hosts mess up if we drive a remote wakeup after 100ms
+0577 19 05 [04]         mov             A, 05h
+0579 17 41 [07]         cmp             A, [wakeup_timer]
+057B A5 81 [05]         jz              test_buttons            
+057D 23 41 [07]         inc             [wakeup_timer]
+057F 86 2E [05]         jmp             wakeup_done
+                
+                
+                        ;**********************************
+                        ; test for button status change
+0581                    test_buttons:
+0581 19 00 [04]                 mov             A, 00h
+0583 31 3D [05]                 mov             [int_temp], A
+0585                    wakeup_left_button_read:
+0585 29 00 [05]                 iord    LEFT_BUTTON_PORT
+0587 10 80 [04]                 and             A, LEFT_BUTTON
+0589 B5 8F [05]                 jnz             wakeup_right_button_read
+058B 19 01 [04]                         mov             A, HID_LEFT_MOUSE_BUTTON
+058D 33 3D [07]                         or              [int_temp], A
+058F                    wakeup_right_button_read:
+058F 29 01 [05]                 iord    RIGHT_BUTTON_PORT
+0591 10 01 [04]                 and             A, RIGHT_BUTTON
+0593 B5 99 [05]                 jnz             wakeup_middle_button_read
+0595 19 02 [04]                         mov             A, HID_RIGHT_MOUSE_BUTTON 
+0597 33 3D [07]                         or              [int_temp], A
+0599                    wakeup_middle_button_read:
+0599 29 01 [05]                 iord    MIDDLE_BUTTON_PORT
+059B 10 02 [04]                 and             A, MIDDLE_BUTTON
+059D B5 A3 [05]                 jnz             wakeup_button_read_done
+059F 19 04 [04]                         mov             A, HID_MIDDLE_MOUSE_BUTTON
+05A1 33 3D [07]                         or              [int_temp], A
+05A3                    wakeup_button_read_done:
+05A3 1A 3D [05]                 mov             A, [int_temp]
+05A5 14 2F [06]                 xor             A, [current_button_state]
+05A7 B6 14 [05]                 jnz             force_wakeup            
+                
+                
+                        ;**********************************
+                        ; test for optics status change
+                
+                        ; turn on optics
+05A9 19 80 [04]         mov             A, LEFT_BUTTON
+05AB 2A 00 [05]         iowr    OPTIC_CONTROL_PORT
+                
+                        ; wait 100us for phototransistors to turn on
+05AD 19 80 [04]         mov             A, 80h                                                  
+05AF                    optic_delay:
+05AF 25    [04]                 dec     A
+05B0 B5 AF [05]                 jnz     optic_delay
+                
+                        ; test x-axis for change
+05B2 19 00 [04]         mov             A, 00h
+05B4 31 3D [05]         mov             [int_temp], A
+                
+05B6                    test_x0:
+05B6 29 00 [05]         iord    X_OPTICS_PORT
+05B8 41    [04]         mov             X, A
+05B9 10 01 [04]         and             A, X0
+05BB A5 C1 [05]         jz              test_x1
+05BD 19 01 [04]                 mov             A, 01h
+05BF 33 3D [07]                 or              [int_temp], A
+05C1                    test_x1:
+05C1 40    [04]         mov             A, X
+05C2 10 02 [04]         and             A, X1
+05C4 A5 CA [05]         jz              test_x
+05C6 19 02 [04]                 mov             A, 02h
+05C8 33 3D [07]                 or              [int_temp], A
+                
+05CA                    test_x:
+05CA 1A 3D [05]                 mov             A, [int_temp]
+05CC 17 3A [07]                 cmp             A, [x_last_state]
+05CE B6 14 [05]                 jnz             force_wakeup
+                
+                        ; test y-axis for change
+05D0 19 00 [04]         mov             A, 00h
+05D2 31 3D [05]         mov             [int_temp], A
+                
+05D4                    test_y0:
+05D4 29 00 [05]         iord    Y_OPTICS_PORT
+05D6 41    [04]         mov             X, A
+05D7 10 04 [04]         and             A, Y0
+05D9 A5 DF [05]         jz              test_y1
+05DB 19 01 [04]                 mov             A, 01h
+05DD 33 3D [07]                 or              [int_temp], A
+05DF                    test_y1:
+05DF 40    [04]         mov             A, X
+05E0 10 08 [04]         and             A, Y1
+05E2 A5 E8 [05]         jz              test_y
+05E4 19 02 [04]                 mov             A, 02h
+05E6 33 3D [07]                 or              [int_temp], A
+                
+05E8                    test_y:
+05E8 1A 3D [05]                 mov             A, [int_temp]
+05EA 17 3B [07]                 cmp             A, [y_last_state]
+05EC B6 14 [05]                 jnz             force_wakeup
+                
+                        ; test z-axis for change
+05EE 19 00 [04]         mov             A, 00h
+05F0 31 3D [05]         mov             [int_temp], A
+                
+05F2                    test_z0:
+05F2 29 00 [05]         iord    Z_OPTICS_PORT
+05F4 41    [04]         mov             X, A
+05F5 10 20 [04]         and             A, Z0
+05F7 A5 FD [05]         jz              test_z1
+05F9 19 01 [04]                 mov             A, 01h
+05FB 33 3D [07]                 or              [int_temp], A
+05FD                    test_z1:
+05FD 40    [04]         mov             A, X
+05FE 20    [04]         NOP
+05FF 1F    [04]         XPAGE
+0600 10 10 [04]         and             A, Z1
+0602 A6 08 [05]         jz              test_z
+0604 19 02 [04]                 mov             A, 02h
+0606 33 3D [07]                 or              [int_temp], A
+                
+0608                    test_z:
+0608 1A 3D [05]                 mov             A, [int_temp]
+060A 17 3C [07]                 cmp             A, [z_last_state]
+060C B6 14 [05]                 jnz             force_wakeup
+                
+                
+                        ; if there is no change in the optics, then we need to go back to sleep
+060E 19 C0 [04]         mov             A, LEFT_BUTTON | OPTIC_CONTROL
+0610 2A 00 [05]         iowr    OPTIC_CONTROL_PORT
+                
+0612 2B    [04]         pop             A
+0613 73    [08]         reti
+                
+                
+                        ;**********************************
+                        ; force resume for 14ms
+0614                    force_wakeup:
+0614 19 42 [04]                 mov             A, VREG_ENABLE | CONTROL1               ; force J
+0616 2A 1F [05]                 iowr    usb_status
+0618 19 41 [04]                 mov             A, VREG_ENABLE | CONTROL0               ; force K
+061A 2A 1F [05]                 iowr    usb_status
+                        
+061C 19 48 [04]                 mov             A, 48h                                          ; wait 14ms
+061E                            outer_wakeup_timer:
+061E 2D    [05]                         push    A
+061F 2A 26 [05]                         iowr    watchdog
+0621 19 FF [04]                         mov             A, FFh
+0623                                    inner_wakeup_timer:
+0623 25    [04]                                 dec             A
+0624 B6 23 [05]                                 jnz             inner_wakeup_timer
+0626 2B    [04]                         pop             A
+0627 25    [04]                         dec             A
+0628 B6 1E [05]                         jnz             outer_wakeup_timer
+                
+062A 19 48 [04]         mov             A, VREG_ENABLE | BUS_ACTIVITY   ; disable forcing and signal
+062C 2A 1F [05]         iowr    usb_status                                              ; that we are about to have
+                                                                                                        ; bus activity
+062E                    wakeup_done:
+062E 2B    [04]                 pop             A
+062F 73    [08]                 reti
+                
+                        
+                ;**********************************************************
+                ;                               USB REQUEST JUMP TABLES
+                ;**********************************************************
+                
+0630            XPAGEOFF
+0700            ORG             700h
+                
+                                ; bmRequestTypes commented out are not used for this device,
+                                ; but may be used for your device.  They are kept here as
+                                ; an example of how to use this jumptable.
+                
+0700                            bmRequestType_jumptable:
+0700 82 4E [05]                         jmp             h2d_std_device                  ; 00
+0702 82 53 [05]                         jmp             h2d_std_interface               ; 01    
+0704 82 58 [05]                         jmp             h2d_std_endpoint                ; 02    
+0706 84 BC [05]                         jmp             request_not_supported   ; h2d_std_other                 03      
+0708 84 BC [05]                         jmp             request_not_supported   ; h2d_class_device              04      
+070A 82 5D [05]                         jmp             h2d_class_interface             ; 05    
+070C 84 BC [05]                         jmp             request_not_supported   ; h2d_class_endpoint    06      
+070E 84 BC [05]                         jmp             request_not_supported   ; h2d_class_other               07      
+0710 84 BC [05]                         jmp             request_not_supported   ; h2d_vendor_device             08      
+0712 84 BC [05]                         jmp             request_not_supported   ; h2d_vendor_interface  09      
+0714 84 BC [05]                         jmp             request_not_supported   ; h2d_vendor_endpoint   0A      
+0716 84 BC [05]                         jmp             request_not_supported   ; h2d_vendor_other              0B      
+0718 84 BC [05]                         jmp             request_not_supported   ; 0C    
+071A 84 BC [05]                         jmp             request_not_supported   ; 0D    
+071C 84 BC [05]                         jmp             request_not_supported   ; 0E    
+071E 84 BC [05]                         jmp             request_not_supported   ; 0F    
+0720 82 62 [05]                         jmp             d2h_std_device                  ; 10    
+0722 82 67 [05]                         jmp             d2h_std_interface               ; 11    
+0724 82 6C [05]                         jmp             d2h_std_endpoint                ; 12    
+0726 84 BC [05]                         jmp             request_not_supported   ; d2h_std_other                 13      
+0728 84 BC [05]                         jmp             request_not_supported   ; d2h_class_device              14      
+072A 82 71 [05]                         jmp             d2h_class_interface             ; 15    
+072C 84 BC [05]                         jmp             request_not_supported   ; d2h_class_endpoint    16      
+072E 84 BC [05]                         jmp             request_not_supported   ; d2h_class_other               17      
+0730 84 BC [05]                         jmp             request_not_supported   ; d2h_vendor_device             18      
+0732 84 BC [05]                         jmp             request_not_supported   ; d2h_vendor_interface  19      
+0734 84 BC [05]                         jmp             request_not_supported   ; d2h_vendor_endpoint   1A      
+0736 84 BC [05]                         jmp             request_not_supported   ; d2h_vendor_other              1B      
+0738 84 BC [05]                         jmp             request_not_supported   ; 1C    
+073A 84 BC [05]                         jmp             request_not_supported   ; 1D    
+073C 84 BC [05]                         jmp             request_not_supported   ; 1E    
+073E 84 BC [05]                         jmp             request_not_supported   ; 1F    
+                
+0740                            h2d_std_device_jumptable:
+0740 84 BC [05]                         jmp             request_not_supported   ; 00
+0742 82 76 [05]                         jmp             clear_device_feature    ; 01
+0744 84 BC [05]                         jmp             request_not_supported   ; 02
+0746 82 86 [05]                         jmp             set_device_feature              ; 03
+0748 84 BC [05]                         jmp             request_not_supported   ; 04
+074A 82 96 [05]                         jmp             set_device_address              ; 05
+074C 84 BC [05]                         jmp             request_not_supported   ; 06
+074E 84 BC [05]                         jmp             request_not_supported   ; set_device_descriptor         07
+0750 84 BC [05]                         jmp             request_not_supported   ; 08
+0752 82 A0 [05]                         jmp             set_device_configuration; 09
+                
+0754                            h2d_std_interface_jumptable:
+0754 84 BC [05]                         jmp             request_not_supported   ; 00
+0756 84 BC [05]                         jmp             request_not_supported   ; clear_interface_feature 01
+0758 84 BC [05]                         jmp             request_not_supported   ; 02
+075A 84 BC [05]                         jmp             request_not_supported   ; set_interface_feature  03
+075C 84 BC [05]                         jmp             request_not_supported   ; 04
+075E 84 BC [05]                         jmp             request_not_supported   ; 05
+0760 84 BC [05]                         jmp             request_not_supported   ; 06
+0762 84 BC [05]                         jmp             request_not_supported   ; 07
+0764 84 BC [05]                         jmp             request_not_supported   ; 08
+0766 84 BC [05]                         jmp             request_not_supported   ; 09
+0768 84 BC [05]                         jmp             request_not_supported   ; 0A
+076A 83 6F [05]                         jmp             set_interface_interface ; 0B
+                
+076C                            h2d_std_endpoint_jumptable:
+076C 84 BC [05]                         jmp             request_not_supported   ; 00
+076E 84 52 [05]                         jmp             clear_endpoint_feature  ; 01
+0770 84 BC [05]                         jmp             request_not_supported   ; 02
+0772 84 62 [05]                         jmp             set_endpoint_feature    ; 03
+                
+0774                            h2d_class_interface_jumptable:
+0774 84 BC [05]                         jmp             request_not_supported   ; 00
+0776 84 BC [05]                         jmp             request_not_supported   ; 01
+0778 84 BC [05]                         jmp             request_not_supported   ; 02
+077A 84 BC [05]                         jmp             request_not_supported   ; 03
+077C 84 BC [05]                         jmp             request_not_supported   ; 04
+077E 84 BC [05]                         jmp             request_not_supported   ; 05
+0780 84 BC [05]                         jmp             request_not_supported   ; 06
+0782 84 BC [05]                         jmp             request_not_supported   ; 07
+0784 84 BC [05]                         jmp             request_not_supported   ; 08
+0786 84 BC [05]                         jmp             request_not_supported   ; set_report 09
+0788 83 91 [05]                         jmp             set_interface_idle              ; 0A
+078A 83 D5 [05]                         jmp             set_interface_protocol  ; 0B
+                                                                                        
+078C                            d2h_std_device_jumptable:
+078C 82 D8 [05]                         jmp             get_device_status               ; 00
+078E 84 BC [05]                         jmp             request_not_supported   ; 01
+0790 84 BC [05]                         jmp             request_not_supported   ; 02
+0792 84 BC [05]                         jmp             request_not_supported   ; 03
+0794 84 BC [05]                         jmp             request_not_supported   ; 04
+0796 84 BC [05]                         jmp             request_not_supported   ; 05
+0798 82 EE [05]                         jmp             get_device_descriptor   ; 06
+079A 84 BC [05]                         jmp             request_not_supported   ; 07
+079C 83 59 [05]                         jmp             get_device_configuration; 08
+                
+079E                            d2h_std_interface_jumptable:
+079E 83 7D [05]                         jmp             get_interface_status    ; 00
+07A0 84 BC [05]                         jmp             request_not_supported   ; 01
+07A2 84 BC [05]                         jmp             request_not_supported   ; 02
+07A4 84 BC [05]                         jmp             request_not_supported   ; 03
+07A6 84 BC [05]                         jmp             request_not_supported   ; 04
+07A8 84 BC [05]                         jmp             request_not_supported   ; 05
+07AA 84 2E [05]                         jmp             get_interface_hid               ; 06
+07AC 84 BC [05]                         jmp             request_not_supported   ; 07
+07AE 84 BC [05]                         jmp             request_not_supported   ; 08
+07B0 84 BC [05]                         jmp             request_not_supported   ; 09
+07B2 83 87 [05]                         jmp             get_interface_interface ; 0A
+                        
+07B4                            d2h_std_endpoint_jumptable:
+07B4 84 72 [05]                         jmp             get_endpoint_status             ; 00
+07B6 84 BC [05]                         jmp             request_not_supported   ; 01
+07B8 84 BC [05]                         jmp             request_not_supported   ; 02
+07BA 84 BC [05]                         jmp             request_not_supported   ; 03
+07BC 84 BC [05]                         jmp             request_not_supported   ; 04
+07BE 84 BC [05]                         jmp             request_not_supported   ; 05
+07C0 84 BC [05]                         jmp             request_not_supported   ; 06
+07C2 84 BC [05]                         jmp             request_not_supported   ; 07
+07C4 84 BC [05]                         jmp             request_not_supported   ; 08
+07C6 84 BC [05]                         jmp             request_not_supported   ; 09
+07C8 84 BC [05]                         jmp             request_not_supported   ; 0A
+07CA 84 BC [05]                         jmp             request_not_supported   ; 0B
+07CC 84 BC [05]                         jmp             request_not_supported   ; synch frame 0C
+                        
+07CE                            d2h_class_interface_jumptable:
+07CE 84 BC [05]                         jmp             request_not_supported   ; 00
+07D0 83 DF [05]                         jmp             get_interface_report    ; 01
+07D2 83 FF [05]                         jmp             get_interface_idle              ; 02
+07D4 84 18 [05]                         jmp             get_interface_protocol  ; 03
+                
+07D6                            ep0_in_jumptable:
+07D6 84 BC [05]                         jmp             request_not_supported
+07D8 84 C9 [05]                         jmp             control_read_data_stage
+07DA 84 F7 [05]                         jmp             control_write_status_stage
+07DC 85 03 [05]                         jmp             no_data_control_status_stage            
+                
+07DE                            ep0_out_jumptable:
+07DE 84 BC [05]                         jmp             request_not_supported
+07E0 85 1E [05]                         jmp             control_read_status_stage
+07E2 85 29 [05]                         jmp             control_write_data_stage
+07E4 85 3E [05]                         jmp             no_data_control_error
+                
+                
+07E6                            get_device_descriptor_jumptable:
+07E6 84 BC [05]                         jmp             request_not_supported
+07E8 82 F3 [05]                         jmp             send_device_descriptor
+07EA 82 FF [05]                         jmp             send_configuration_descriptor
+07EC 83 0C [05]                         jmp             send_string_descriptor
+07EE 83 41 [05]                         jmp             send_interface_descriptor
+07F0 83 4D [05]                         jmp             send_endpoint_descriptor
+                
+07F2                            string_jumptable:
+07F2 83 11 [05]                         jmp             language_string
+07F4 83 1D [05]                         jmp             manufacturer_string
+07F6 83 29 [05]                         jmp             product_string
+07F8 84 BC [05]                         jmp             request_not_supported
+07FA 83 35 [05]                         jmp             configuration_string
+                
+                
+                ;*********************************************************
+                ;                       USB DESCRIPTOR ROM TABLES
+                ;*********************************************************
+                
+07FC            XPAGEOFF
+0800            ORG             800h
+                
+0800            control_read_table:
+0800               device_desc_table:
+0800 12    [00]         db      12h                     ; bLength (18 bytes)
+0801 01    [00]         db      01h                     ; bDescriptorType (device descriptor)
+0802 10    [00]         db      10h, 01h        ; bcdUSB (ver 1.1)
+0803 01    [00] 
+0804 00    [00]         db      00h                     ; bDeviceClass (each interface specifies class info)
+0805 00    [00]         db      00h                     ; bDeviceSubClass (not specified)
+0806 00    [00]         db      00h                     ; bDeviceProtocol (not specified)
+0807 08    [00]         db      08h                     ; bMaxPacketSize0 (8 bytes)
+0808 B4    [00]         db      B4h, 04h        ; idVendor (Cypress vendor ID)
+0809 04    [00] 
+080A 20    [00]         db      20h, 63h        ; idProduct (Cypress USB mouse product ID)
+080B 63    [00] 
+080C 00    [00]         db      00h, 01h        ; bcdDevice (1.00) 
+080D 01    [00] 
+080E 01    [00]         db      01h                     ; iManufacturer (Cypress Semiconductor)
+080F 02    [00]         db      02h                     ; iProduct (Cypress 632xx Mouse)
+0810 00    [00]         db      00h                     ; iSerialNumber (not supported)
+0811 01    [00]         db      01h                     ; bNumConfigurations (1)
+                
+0812               config_desc_table:
+0812 09    [00]         db      09h                     ; bLength (9 bytes)
+0813 02    [00]         db      02h                     ; bDescriptorType (CONFIGURATION)
+0814 22    [00]         db      22h, 00h        ; wTotalLength (34 bytes)
+0815 00    [00] 
+0816 01    [00]         db      01h                     ; bNumInterfaces (1)
+0817 01    [00]         db      01h                     ; bConfigurationValue (1)
+0818 04    [00]         db      04h                     ; iConfiguration (USB HID Compliant Mouse)
+0819 A0    [00]         db      A0h                     ; bmAttributes (bus powered, remote wakeup)
+081A 32    [00]         db      32h                     ; MaxPower (100mA)
+081B               interface_desc_table:
+081B 09    [00]         db      09h                     ; bLength (9 bytes)
+081C 04    [00]         db      04h                     ; bDescriptorType (INTERFACE)
+081D 00    [00]         db      00h                     ; bInterfaceNumber (0)
+081E 00    [00]         db      00h                     ; bAlternateSetting (0)
+081F 01    [00]         db      01h                     ; bNumEndpoints (1)
+0820 03    [00]         db      03h                     ; bInterfaceClass (3..defined by USB spec)
+0821 01    [00]         db      01h                     ; bInterfaceSubClass (1..defined by USB spec)
+0822 02    [00]         db      02h                     ; bInterfaceProtocol (2..defined by USB spec)
+0823 00    [00]         db      00h                     ; iInterface (not supported)
+0824               hid_desc_table:
+0824 09    [00]         db      09h                     ; bLength (9 bytes)
+0825 21    [00]         db      21h                     ; bDescriptorType (HID)
+0826 00    [00]         db      00h, 01h        ; bcdHID (1.00) 
+0827 01    [00] 
+0828 00    [00]         db      00h                     ; bCountryCode (US)
+0829 01    [00]         db      01h                     ; bNumDescriptors (1)
+082A 22    [00]         db      22h                     ; bDescriptorType (HID)
+082B 48    [00]         db      48h, 00h        ; wDescriptorLength (72 bytes) 
+082C 00    [00] 
+082D               endpoint_desc_table:
+082D 07    [00]         db      07h                     ; bLength (7 bytes)
+082E 05    [00]         db      05h                     ; bDescriptorType (ENDPOINT)
+082F 81    [00]         db      81h                     ; bEndpointAddress (IN endpoint, endpoint 1)
+0830 03    [00]         db      03h                     ; bmAttributes (interrupt)
+0831 04    [00]         db      04h, 00h        ; wMaxPacketSize (4 bytes)
+0832 00    [00] 
+0833 0A    [00]         db      0Ah                     ; bInterval (10ms)
+                
+0834            hid_report_desc_table:
+0834 05    [00]         db      05h, 01h        ; usage page (generic desktop)
+0835 01    [00] 
+0836 09    [00]         db      09h, 02h        ; usage (mouse)
+0837 02    [00] 
+0838 A1    [00]         db      A1h, 01h        ; collection (application)
+0839 01    [00] 
+083A 05    [00]         db      05h, 09h        ; usage page (buttons)
+083B 09    [00] 
+083C 19    [00]         db      19h, 01h        ; usage minimum (1 button)
+083D 01    [00] 
+083E 29    [00]         db      29h, 03h        ; usage maximum (3 buttons)
+083F 03    [00] 
+0840 15    [00]         db      15h, 00h        ; logical minimum (0)
+0841 00    [00] 
+0842 25    [00]         db      25h, 01h        ; logical maximum (1)
+0843 01    [00] 
+0844 95    [00]         db      95h, 03h        ; report count (3 reports)
+0845 03    [00] 
+0846 75    [00]         db      75h, 01h        ; report size (1 bit each)
+0847 01    [00] 
+0848 81    [00]         db      81h, 02h        ; input (Data, Var, Abs)
+0849 02    [00] 
+084A 95    [00]         db      95h, 01h        ; report count (1 report)
+084B 01    [00] 
+084C 75    [00]         db      75h, 05h        ; report size (5 bits)
+084D 05    [00] 
+084E 81    [00]         db      81h, 03h        ; input (Cnst, Ary, Abs)
+084F 03    [00] 
+0850 05    [00]         db      05h, 01h        ; usage page (generic desktop)
+0851 01    [00] 
+0852 09    [00]         db      09h, 01h        ; usage (pointer)
+0853 01    [00] 
+0854 A1    [00]         db      A1h, 00h        ; collection (linked)
+0855 00    [00] 
+0856 09    [00]         db      09h, 30h        ; usage (X)
+0857 30    [00] 
+0858 09    [00]         db      09h, 31h        ; usage (Y)
+0859 31    [00] 
+085A 15    [00]         db      15h, 81h        ; logical minimum (-127)
+085B 81    [00] 
+085C 25    [00]         db      25h, 7Fh        ; logical maximum (127)
+085D 7F    [00] 
+085E 75    [00]         db      75h, 08h        ; report size (8 bits each)
+085F 08    [00] 
+0860 95    [00]         db      95h, 02h        ; report count (2 reports)
+0861 02    [00] 
+0862 81    [00]         db      81h, 06h        ; input (Cnst, Var, Rel)
+0863 06    [00] 
+0864 C0    [00]         db      C0h                     ; end collection        
+0865 09    [00]         db      09h, 38h        ; wheel
+0866 38    [00] 
+0867 95    [00]         db      95h, 01h        ; wheel size = 1 byte
+0868 01    [00] 
+0869 81    [00]         db      81h, 06h        ; variable data bit field with relative position
+086A 06    [00] 
+086B 09    [00]         db      09h, 3ch        ; motion wake up
+086C 3C    [00] 
+086D 15    [00]         db      15h, 00h        ; 0 no movement
+086E 00    [00] 
+086F 25    [00]         db      25h, 01h        ; 1 movement
+0870 01    [00] 
+0871 75    [00]         db      75h, 01h        ; 1st bit represent movement
+0872 01    [00] 
+0873 95    [00]         db      95h, 01h        ; 1 report
+0874 01    [00] 
+0875 B1    [00]         db      b1h, 22h        ; variable data bit field with absolute positioning and no preferred state
+0876 22    [00] 
+0877 95    [00]         db      95h, 07h        ; 7 reports for reversing, upper 7 bits of byte 3
+0878 07    [00] 
+0879 B1    [00]         db      b1h, 01h        ; constant array bit field with absolute positioning
+087A 01    [00] 
+087B C0    [00]         db      0c0h            ; end collection, end collection
+                
+087C               device_status_wakeup_enabled:
+087C 02    [00]     db  02h, 00h    ; remote wakeup enabled, bus powered
+087D 00    [00] 
+087E               device_status_wakeup_disabled:
+087E 00    [00]     db  00h, 00h    ; remote wakeup disabled, bus powered
+087F 00    [00] 
+                
+0880               device_configured_table:
+0880 01    [00]         db      01h                     ; device in configured state
+0881               device_unconfigured_table:
+0881 00    [00]         db      00h                     ; device in unconfigured state
+                
+0882               endpoint_nostall_table:
+0882 00    [00]         db      00h, 00h        ; endpoint not stalled
+0883 00    [00] 
+0884               endpoint_stall_table:
+0884 01    [00]         db      01h, 00h        ; endpoint stalled
+0885 00    [00] 
+                
+0886               interface_status_table:
+0886 00    [00]         db      00h, 00h        ; default response
+0887 00    [00] 
+                
+0888               interface_alternate_table:
+0888 00    [00]         db      00h                     ; only valid alternate setting
+                
+0889               interface_boot_protocol:
+0889 00    [00]         db      00h
+088A               interface_report_protocol:
+088A 01    [00]         db      01h
+                
+088B               ilanguage_string:
+088B 04    [00]     db 04h                                      ; Length
+088C 03    [00]     db 03h                                      ; Type (3=string)
+088D 09    [00]     db 09h                                      ; Language:  English
+088E 04    [00]     db 04h                                      ; Sub-language: US
+                
+088F               imanufacturer_string:
+088F 1C    [00]     db 1Ch                                      ; Length
+0890 03    [00]     db 03h                                      ; Type (3=string)
+0891 43 00 ...      dsu "Cypress Semi."
+     79 00 70 00 72 00 65 00 73 00 73 00 20 00 53 00 65 00 6D 00 69 00 2E 00 
+                
+08AB               iproduct_string:
+08AB 28    [00]     db 28h                                      ; Length
+08AC 03    [00]     db 03h                                      ; Type (3=string)
+08AD 43 00 ...      dsu "Cypress 632xx Mouse"
+     79 00 70 00 72 00 65 00 73 00 73 00 20 00 36 00 33 00 32 00 78 00 78 00 20 00 
+     4D 00 6F 00 75 00 73 00 65 00 
+                
+08D3               iconfiguration_string:
+08D3 28    [00]     db 28h                                      ; Length
+08D4 03    [00]     db 03h                                      ; Type (3=string)
+08D5 48 00 ...      dsu "HID-Compliant Mouse"
+     49 00 44 00 2D 00 43 00 6F 00 6D 00 70 00 6C 00 69 00 61 00 6E 00 74 00 20 00 
+     4D 00 6F 00 75 00 73 00 65 00 
+                
+                
+                ;**********************************************************
+                ;                               TASK LOOP JUMP TABLES
+                ;**********************************************************
+                
+08FB            XPAGEOFF
+0900            ORG 900h
+                
+0900                            button_machine_jumptable:
+0900 80 B7 [05]                         jmp             no_button_task
+0902 80 8B [05]                         jmp             button_task
+                
+0904                            event_machine_jumptable:
+0904 81 81 [05]                         jmp             no_event_task
+0906 81 55 [05]                         jmp             event_pending
+                
+0908                            x_jumptable:                                    ; [x_last_state]        [x_current_state]
+0908 81 13 [05]                         jmp     analyze_y_optics                ; 00                            00      
+090A 81 05 [05]                         jmp     x_increment                             ; 00                            01
+090C 81 0D [05]                         jmp     x_decrement                             ; 00                            10
+090E 81 13 [05]                         jmp     analyze_y_optics                ; 00                            11
+0910 81 0D [05]                         jmp     x_decrement                             ; 01                            00
+0912 81 13 [05]                         jmp     analyze_y_optics                ; 01                            01
+0914 81 13 [05]                         jmp     analyze_y_optics                ; 01                            10
+0916 81 05 [05]                         jmp     x_increment                             ; 01                            11
+0918 81 05 [05]                         jmp     x_increment                             ; 10                            00
+091A 81 13 [05]                         jmp     analyze_y_optics                ; 10                            01
+091C 81 13 [05]                         jmp     analyze_y_optics                ; 10                            10
+091E 81 0D [05]                         jmp     x_decrement                             ; 10                            11
+0920 81 13 [05]                         jmp     analyze_y_optics                ; 11                            00
+0922 81 0D [05]                         jmp     x_decrement                             ; 11                            01
+0924 81 05 [05]                         jmp     x_increment                             ; 11                            10
+0926 81 13 [05]                         jmp     analyze_y_optics                ; 11                            11
+                
+0928                            y_jumptable:                                    ; [y_last_state]        [y_current_state]
+0928 81 2A [05]                         jmp     analyze_z_optics                ; 00                            00      
+092A 81 24 [05]                         jmp     y_decrement                             ; 00                            01
+092C 81 1C [05]                         jmp     y_increment                             ; 00                            10
+092E 81 2A [05]                         jmp     analyze_z_optics                ; 00                            11
+0930 81 1C [05]                         jmp     y_increment                             ; 01                            00
+0932 81 2A [05]                         jmp     analyze_z_optics                ; 01                            01
+0934 81 2A [05]                         jmp     analyze_z_optics                ; 01                            10
+0936 81 24 [05]                         jmp     y_decrement                             ; 01                            11
+0938 81 24 [05]                         jmp     y_decrement                             ; 10                            00
+093A 81 2A [05]                         jmp     analyze_z_optics                ; 10                            01
+093C 81 2A [05]                         jmp     analyze_z_optics                ; 10                            10
+093E 81 1C [05]                         jmp     y_increment                             ; 10                            11
+0940 81 2A [05]                         jmp     analyze_z_optics                ; 11                            00
+0942 81 1C [05]                         jmp     y_increment                             ; 11                            01
+0944 81 24 [05]                         jmp     y_decrement                             ; 11                            10
+0946 81 2A [05]                         jmp     analyze_z_optics                ; 11                            11
+                
+0948                            z_jumptable:                                    ; [z_last_state]        [z_current_state]
+0948 81 45 [05]                         jmp     optic_task_done                 ; 00                            00      
+094A 81 3D [05]                         jmp     z_backward                              ; 00                            01
+094C 81 33 [05]                         jmp     z_forward                               ; 00                            10
+094E 81 45 [05]                         jmp     optic_task_done                 ; 00                            11
+0950 81 33 [05]                         jmp     z_forward                               ; 01                            00
+0952 81 45 [05]                         jmp     optic_task_done                 ; 01                            01
+0954 81 45 [05]                         jmp     optic_task_done                 ; 01                            10
+0956 81 3D [05]                         jmp     z_backward                              ; 01                            11
+0958 81 3D [05]                         jmp     z_backward                              ; 10                            00
+095A 81 45 [05]                         jmp     optic_task_done                 ; 10                            01
+095C 81 45 [05]                         jmp     optic_task_done                 ; 10                            10
+095E 81 33 [05]                         jmp     z_forward                               ; 10                            11
+0960 81 45 [05]                         jmp     optic_task_done                 ; 11                            00
+0962 81 33 [05]                         jmp     z_forward                               ; 11                            01
+0964 81 3D [05]                         jmp     z_backward                              ; 11                            10
+0966 81 45 [05]                         jmp     optic_task_done                 ; 11                            11
+
+CheckSum = 86CA
+Warnings = 0
+Errors   = 0
+
+Product: 63743, CPU Family=B, RAM=256 bytes, ROM=8160 bytes
+
+ ************ SYMBOLIC REFERENCE TABLE ************
+
+Value  Label                # Uses 
+-----  -------------------- ------
+   2 = 128US_INT              0
+   4 = 1MS_INT                2
+ 1c1   1ms_suspend_timer      1
+ 194   1ms_timer              1
+   d = ACK_IN                 2
+   f = ACK_IN_STATUS_OUT      1
+   9 = ACK_OUT                0
+   b = ACK_OUT_NAK_IN         1
+   0 = ADDRESS_CHANGE_PENDING   2
+  80 = ADDRESS_ENABLE         3
+  7f = ADDRESS_MASK           0
+   0 = BMREQUESTTYPE          1
+   1 = BREQUEST               8
+   8 = BUS_ACTIVITY           4
+   2 = BUTTON_DATA_PENDING    2
+   f = BUTTON_DEBOUNCE        2
+   f = BYTE_COUNT             0
+ 183   Bus_reset              1
+   2 = CAPTUREA_FALL_EVENT    0
+   2 = CAPTUREA_FALL_INT      0
+  10 = CAPTUREA_INT           0
+   1 = CAPTUREA_RISE_EVENT    0
+   1 = CAPTUREA_RISE_INT      0
+   8 = CAPTUREB_FALL_EVENT    0
+   8 = CAPTUREB_FALL_INT      0
+  20 = CAPTUREB_INT           0
+   4 = CAPTUREB_RISE_EVENT    0
+   4 = CAPTUREB_RISE_INT      0
+  20 = CLASS_TYPE             0
+   0 = CLEAR                  0
+   1 = CLEAR_FEATURE          0
+   2 = CONFIGURATION          0
+   1 = CONTROL0               1
+   2 = CONTROL1               1
+   4 = CONTROL2               0
+   2 = CONTROL_READ_DATA      2
+   4 = CPHA                   0
+   8 = CPOL                   0
+  80 = DATA_TOGGLE            7
+  40 = DATA_VALID             1
+   1 = DEVICE                 0
+  80 = DEVICETOHOST           0
+   1 = DEVICE_CONFIG_LENGTH   1
+   0 = DEVICE_RECIPIENT       0
+   1 = DEVICE_REMOTE_WAKEUP   2
+   2 = DEVICE_STATUS_LENGTH   1
+   0 = DISABLE                2
+  10 = DMINUS                 0
+  20 = DPLUS                  0
+   5 = ENDPOINT               0
+   2 = ENDPOINT_RECIPIENT     0
+   0 = ENDPOINT_STALL         2
+   2 = ENDPOINT_STALL_LENGTH   1
+  10 = EP0_ACK                1
+  40 = EP0_IN                 0
+   1 = EP0_INT                3
+   0 = EP0_IN_IDLE            0
+   6 = EP0_IN_STALL           0
+  20 = EP0_OUT                0
+  80 = EP0_SETUP              0
+   2 = EP1_INT                1
+   4 = EP2_INT                0
+  10 = EP_ACK                 1
+  80 = EP_STALL               0
+   2 = EVENT_PENDING          9
+   1 = EXTERNAL_CLK           0
+  80 = EXT_DELAY              0
+ 222   Endpoint0              1
+ 549   Endpoint1              1
+  1a   Error                  6
+  80 = FIRST_EDGE_HOLD        0
+   4 = FORCEBOTH_LOW          0
+   6 = FORCESCLK_LOW          0
+   5 = FORCESDATA_LOW         0
+   7 = FORCE_HIZ              0
+   2 = FORCE_J                0
+   1 = FORCE_K                0
+   3 = FORCE_SE0              0
+   8 = GET_CONFIGURATION      0
+   6 = GET_DESCRIPTOR         0
+   2 = GET_IDLE               0
+   a = GET_INTERFACE          0
+   3 = GET_PROTOCOL           0
+   1 = GET_REPORT             0
+   0 = GET_STATUS             0
+  40 = GPIO_INT               0
+   0 = HID_BOOT               0
+   1 = HID_LEFT_MOUSE_BUTTON   2
+   4 = HID_MIDDLE_MOUSE_BUTTON   2
+   1 = HID_REPORT             2
+   2 = HID_RIGHT_MOUSE_BUTTON   2
+   0 = HOSTTODEVICE           0
+   4 = IGNORE_IN_OUT          0
+   4 = INTERFACE              0
+   1 = INTERFACE_ALTERNATE_LENGTH   1
+   1 = INTERFACE_PROTOCOL_LENGTH   1
+   1 = INTERFACE_RECIPIENT    0
+   2 = INTERFACE_STATUS_LENGTH   1
+   2 = INTERNAL_CLK           1
+   4 = INTERRUPT_MASK         0
+  80 = IRQ_PENDING            0
+   7 = ISOCHRONOUS_IN         0
+   5 = ISOCHRONOUS_OUT        0
+  80 = LEFT_BUTTON            8
+   0 = LEFT_BUTTON_PORT       2
+   8 = LVR_DISABLE            0
+   2 = MIDDLE_BUTTON          4
+   1 = MIDDLE_BUTTON_PORT     2
+  10 = MODE0                  0
+  20 = MODE1                  0
+   f = MODE_MASK              0
+  1b   Main                   2
+   c = NAK_IN                 1
+   1 = NAK_IN_OUT             4
+   e = NAK_IN_STATUS_OUT      0
+   8 = NAK_OUT                0
+   a = NAK_OUT_STATUS_IN      0
+   0 = NOT_FORCING            0
+   0 = NO_BUTTON_DATA_PENDING   1
+   2 = NO_CHANGE_PENDING      8
+   4 = NO_DATA_STATUS         0
+   0 = NO_EVENT_PENDING       1
+   0 = NO_OPTIC_DATA_PENDING   0
+  40 = OPTIC_CONTROL          4
+   0 = OPTIC_CONTROL_PORT     4
+   2 = OPTIC_DATA_PENDING     0
+   3 = OTHER_RECIPIENT        0
+  10 = POWERON_RESET          0
+   4 = PRECISION_CLK          1
+  70 = PRESCALE               0
+  10 = PRESCALE0              0
+  20 = PRESCALE1              0
+  40 = PRESCALE2              0
+  80 = PS2_PULLUP             0
+  60 = RESERVED_TYPE          0
+   1 = RIGHT_BUTTON           4
+   1 = RIGHT_BUTTON_PORT      2
+   1 = RUN                    1
+   1 = SCK_SELECT0            0
+   2 = SCK_SELECT1            0
+  20 = SCLK                   0
+  10 = SDATA                  0
+  ff = SET                    1
+   5 = SET_ADDRESS            0
+   9 = SET_CONFIGURATION      0
+   7 = SET_DESCRIPTOR         0
+   3 = SET_FEATURE            0
+   a = SET_IDLE               0
+   b = SET_INTERFACE          0
+   b = SET_PROTOCOL           0
+   9 = SET_REPORT             0
+   2 = SINGLE_STEP            0
+   8 = SPI_INT                0
+   3 = STALL_IN_OUT           6
+   0 = STANDARD_TYPE          0
+   6 = STATUS_IN_ONLY         2
+   2 = STATUS_OUT_ONLY        1
+   3 = STRING                 0
+   8 = SUSPEND                1
+   c = SYNCH_FRAME            0
+  40 = TBF                    0
+  80 = TCMP                   0
+   2 = TRANS_CONTROL_READ     3
+   4 = TRANS_CONTROL_WRITE    1
+   0 = TRANS_NONE             4
+   6 = TRANS_NO_DATA_CONTROL   1
+  20 = USB_PS2_MODE           0
+  20 = USB_RESET              0
+   1 = USB_RESET_INT          3
+  40 = VENDOR_TYPE            0
+   1 = VREG                   0
+  40 = VREG_ENABLE            4
+  10 = WAKEUP_ADJUST0         1
+  20 = WAKEUP_ADJUST1         0
+  40 = WAKEUP_ADJUST2         1
+  80 = WAKEUP_INT             1
+  40 = WATCHDOG_RESET         0
+   5 = WINDEXHI               0
+   4 = WINDEXLO               0
+   7 = WLENGTHHI              1
+   6 = WLENGTHLO              2
+   3 = WVALUEHI               7
+   2 = WVALUELO               9
+ 56e   Wakeup                 1
+   1 = X0                     2
+   2 = X1                     2
+   2 = XTALIN                 0
+   0 = X_OPTICS_PORT          2
+   4 = Y0                     2
+   8 = Y1                     2
+   0 = Y_OPTICS_PORT          2
+  20 = Z0                     2
+  10 = Z1                     2
+   0 = Z_OPTICS_PORT          2
+ 375   alternate_not_supported   0
+ 377   alternate_supported    1
+  fb   analyze_x_optics       1
+ 113   analyze_y_optics       9
+ 12a   analyze_z_optics       9
+ 700   bmRequestType_jumptable   1
+ 428   boot_protocol          1
+ 173   boot_protocol_report   1
+ 1f2   bus_activity           1
+  32 = button_machine         5
+ 900   button_machine_jumptable   1
+ 1bd   button_read_done       1
+  91   button_state_different   0
+  99   button_state_same      1
+  8b   button_task            1
+  b3   button_task_done       3
+  44 = capture_config         0
+  45 = capture_status         0
+  41 = capturea_falling       0
+  40 = capturea_rising        0
+  43 = captureb_falling       0
+  42 = captureb_rising        0
+ 509   change_address         0
+ 276   clear_device_feature   1
+ 452   clear_endpoint_feature   1
+  f8 = clock_config           1
+ 812   config_desc_table      2
+  28 = configuration          5
+ 335   configuration_string   1
+ 2b2   configure_device       1
+  ff = control                1
+ 4c9   control_read_data_stage   2
+ 51e   control_read_status_stage   1
+ 800   control_read_table     21
+ 529   control_write_data_stage   1
+ 53b   control_write_data_stage_done   2
+ 4f7   control_write_status_stage   1
+  2f = current_button_state   8
+ 271   d2h_class_interface    1
+ 7ce   d2h_class_interface_jumptable   1
+ 262   d2h_std_device         1
+ 78c   d2h_std_device_jumptable   1
+ 26c   d2h_std_endpoint       1
+ 7b4   d2h_std_endpoint_jumptable   1
+ 267   d2h_std_interface      1
+ 79e   d2h_std_interface_jumptable   1
+  24 = data_count             0
+  23 = data_start             22
+  2d = debounce_count         6
+ 20e   decrement_idle_timer   1
+ 363   device_configured      0
+ 880   device_configured_table   1
+ 800   device_desc_table      2
+ 87e   device_status_wakeup_disabled   1
+ 87c   device_status_wakeup_enabled   1
+ 369   device_unconfigured    1
+ 881   device_unconfigured_table   1
+ 4d1   dmabuffer_load         1
+ 4e5   dmabuffer_load_done    5
+ 56c   endpoint1_done         1
+ 568   endpoint1_nak          1
+ 55c   endpoint1_set_response   1
+ 82d   endpoint_desc_table    2
+  21 = endpoint_int           3
+ 882   endpoint_nostall_table   1
+ 47c   endpoint_not_stalled   0
+ 884   endpoint_stall_table   1
+ 482   endpoint_stalled       1
+  11 = ep0_count              4
+  22 = ep0_data_toggle        8
+  f8 = ep0_dmabuff            36
+  f8 = ep0_dmabuff0           3
+  f9 = ep0_dmabuff1           1
+  fa = ep0_dmabuff2           1
+  fb = ep0_dmabuff3           0
+  fc = ep0_dmabuff4           0
+  fd = ep0_dmabuff5           0
+  fe = ep0_dmabuff6           0
+  ff = ep0_dmabuff7           0
+ 235   ep0_done               1
+  27 = ep0_in_flag            10
+ 7d6   ep0_in_jumptable       1
+  26 = ep0_in_machine         3
+ 4c5   ep0_in_received        1
+  12 = ep0_mode               15
+ 7de   ep0_out_jumptable      1
+ 51a   ep0_out_received       1
+ 238   ep0_setup_received     1
+  40 = ep0_transtype          12
+  13 = ep1_count              2
+  21 = ep1_data_toggle        4
+  f0 = ep1_dmabuff            8
+  f0 = ep1_dmabuff0           4
+  f1 = ep1_dmabuff1           6
+  f2 = ep1_dmabuff2           6
+  f3 = ep1_dmabuff3           4
+  f4 = ep1_dmabuff4           0
+  f5 = ep1_dmabuff5           0
+  f6 = ep1_dmabuff6           0
+  f7 = ep1_dmabuff7           0
+  14 = ep1_mode               9
+ 2c0   ep1_nak_in_out         1
+ 2c4   ep1_set_int            1
+  2a = ep1_stall              7
+  15 = ep2_count              0
+  e8 = ep2_dmabuff            8
+  e8 = ep2_dmabuff0           0
+  e9 = ep2_dmabuff1           0
+  ea = ep2_dmabuff2           0
+  eb = ep2_dmabuff3           0
+  ec = ep2_dmabuff4           0
+  ed = ep2_dmabuff5           0
+  ee = ep2_dmabuff6           0
+  ef = ep2_dmabuff7           0
+  16 = ep2_mode               0
+  34 = event_machine          12
+ 904   event_machine_jumptable   1
+ 155   event_pending          1
+ 17d   event_task_done        3
+ 614   force_wakeup           4
+ 359   get_device_configuration   1
+ 2ee   get_device_descriptor   1
+ 7e6   get_device_descriptor_jumptable   1
+ 2d8   get_device_status      1
+ 472   get_endpoint_status    1
+ 43a   get_hid_desc           1
+ 446   get_hid_report_desc    1
+ 42e   get_interface_hid      1
+ 3ff   get_interface_idle     1
+ 387   get_interface_interface   1
+ 418   get_interface_protocol   1
+ 3df   get_interface_report   1
+ 37d   get_interface_status   1
+  20 = global_int             3
+ 25d   h2d_class_interface    1
+ 774   h2d_class_interface_jumptable   1
+ 24e   h2d_std_device         1
+ 740   h2d_std_device_jumptable   1
+ 258   h2d_std_endpoint       1
+ 76c   h2d_std_endpoint_jumptable   1
+ 253   h2d_std_interface      1
+ 754   h2d_std_interface_jumptable   1
+ 824   hid_desc_table         3
+ 167   hid_protocol_report    0
+ 834   hid_report_desc_table   1
+ 8d3   iconfiguration_string   2
+  2b = idle                   8
+  3f = idle_prescaler         7
+  3e = idle_timer             8
+ 3a5   idle_timer_disable     1
+ 1fc   idle_timer_handler     1
+ 88b   ilanguage_string       2
+ 88f   imanufacturer_string   2
+  9f   increment_debounce_counter   0
+ 488   initialize_control_read   20
+ 4a0   initialize_control_read_done   2
+ 4a2   initialize_control_write   0
+ 4b1   initialize_no_data_control   9
+ 623   inner_wakeup_timer     1
+  3d = int_temp               20
+ 888   interface_alternate_table   1
+ 889   interface_boot_protocol   1
+ 81b   interface_desc_table   2
+ 88a   interface_report_protocol   1
+ 886   interface_status_table   1
+ 8ab   iproduct_string        2
+ 311   language_string        1
+  36 = last_button_state      3
+ 19f   left_button_read       0
+ 31d   manufacturer_string    1
+  25 = maximum_data_count     20
+ 1b3   middle_button_read     1
+ 220   ms_timer_done          3
+  b7   no_button_task         1
+ 53e   no_data_control_error   1
+ 503   no_data_control_status_stage   1
+ 50f   no_data_status_done    1
+ 181   no_event_task          1
+ 5af   optic_delay            1
+  2e = optic_status           0
+  b7   optic_task             0
+ 145   optic_task_done        9
+ 61e   outer_wakeup_timer     1
+  35 = pending_data           2
+   0 = port0                  6
+   4 = port0_int              0
+   6 = port0_int_polarity     0
+   a = port0_mode0            1
+   b = port0_mode1            1
+   1 = port1                  3
+   5 = port1_int              0
+   7 = port1_int_polarity     0
+   c = port1_mode0            1
+   d = port1_mode1            1
+   2 = port2                  0
+ 329   product_string         1
+  2c = protocol               4
+  c2   read_x0                0
+  ca   read_x1                1
+  bf   read_x_optics          0
+  d6   read_y0                0
+  de   read_y1                1
+  d3   read_y_optics          1
+  ea   read_z0                0
+  f2   read_z1                1
+  e7   read_z_optics          1
+  29 = remote_wakeup          5
+ 2e8   remote_wakeup_disabled   1
+ 2e2   remote_wakeup_enabled   0
+ 422   report_protocol        0
+ 4bc   request_not_supported   90
+ 218   reset_idle_timer       1
+ 1a9   right_button_read      1
+ 2ff   send_configuration_descriptor   1
+ 2f3   send_device_descriptor   1
+ 34d   send_endpoint_descriptor   1
+ 341   send_interface_descriptor   1
+ 30c   send_string_descriptor   1
+  a9   set_button_event       1
+ 296   set_device_address     1
+ 2a0   set_device_configuration   1
+ 2d2   set_device_configuration_done   1
+ 286   set_device_feature     1
+ 462   set_endpoint_feature   1
+ 3cf   set_idle_done          3
+ 3a9   set_idle_last_not_expired   1
+ 3b9   set_idle_new_timer_less   1
+ 3c5   set_idle_normal        1
+ 391   set_interface_idle     1
+ 36f   set_interface_interface   1
+ 3d5   set_interface_protocol   1
+  61 = spi_control            0
+  60 = spi_data               0
+ 7f2   string_jumptable       1
+  20 = suspend_count          4
+  85   task_loop              1
+  33 = temp                   0
+ 581   test_buttons           1
+ 5ca   test_x                 1
+ 5b6   test_x0                0
+ 5c1   test_x1                1
+ 5e8   test_y                 1
+ 5d4   test_y0                0
+ 5df   test_y1                1
+ 608   test_z                 1
+ 5f2   test_z0                0
+ 5fd   test_z1                1
+  24 = timer_lsb              0
+  25 = timer_msb              0
+ 2a6   unconfigure_device     0
+  10 = usb_address            3
+  1f = usb_status             8
+ 1d1   usb_suspend            2
+ 5a3   wakeup_button_read_done   1
+ 62e   wakeup_done            2
+ 585   wakeup_left_button_read   0
+ 599   wakeup_middle_button_read   1
+ 58f   wakeup_right_button_read   1
+  41 = wakeup_timer           4
+  26 = watchdog               3
+  37 = x_current_state        5
+ 10d   x_decrement            4
+ 105   x_increment            4
+ 908   x_jumptable            1
+  3a = x_last_state           4
+  30 = x_state                1
+  38 = y_current_state        5
+ 124   y_decrement            4
+ 11c   y_increment            4
+ 928   y_jumptable            1
+  3b = y_last_state           4
+  31 = y_state                1
+ 13d   z_backward             4
+  39 = z_current_state        5
+ 133   z_forward              4
+ 948   z_jumptable            1
+  3c = z_last_state           4

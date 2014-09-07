@@ -4,7 +4,7 @@
 #define PLFM_M8B 0x8783
 
 #pragma warning(disable: 4267)
-#include "../idaidp.hpp"
+#include "idaidp.hpp"
 #include "ins.hpp"
 #include <diskio.hpp>
 #pragma warning(default: 4267)

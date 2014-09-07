@@ -54,10 +54,10 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <CustomBuildStep>
       <Command>..\..\bin\mkidp.exe $(OutDir)$(ProjectName).w32 "Cypress enCoRe/M8 USB:m8b"
-xcopy /Y $(OutDir)$(ProjectName).w32 D:\IDA61ADV\procs
-xcopy /Y $(ProjectDir)$(ProjectName).cfg D:\IDA61ADV\cfg
+xcopy /Y $(OutDir)$(ProjectName).w32 ..\bin\procs 
+xcopy /Y $(ProjectDir)$(ProjectName).cfg ..\bin\cfg
 </Command>
-      <Outputs>D:\IDA61ADV\procs\$(ProjectName).w32;%(Outputs)</Outputs>
+      <Outputs>..\bin\procs\$(ProjectName).w32;%(Outputs)</Outputs>
     </CustomBuildStep>
     <ClCompile>
       <Optimization>Disabled</Optimization>
@@ -75,8 +75,8 @@ xcopy /Y $(ProjectDir)$(ProjectName).cfg D:\IDA61ADV\cfg
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
     </ClCompile>
     <Link>
-      <AdditionalOptions>/EXPORT:LPH /STUB:..\stub %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalDependencies>..\..\lib\x86_win_vc_32\ida.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalOptions>/EXPORT:LPH %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalDependencies>C:\Hex-Rays.IDA.Pro.Advanced.v6.5\idasdk\\lib\x86_win_vc_32\ida.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OutputFile>$(OutDir)$(ProjectName).w32</OutputFile>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Windows</SubSystem>

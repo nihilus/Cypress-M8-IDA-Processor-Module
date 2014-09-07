@@ -150,7 +150,7 @@ void idaapi header()
     gen_cmt_line("Target assembler: %s", ash.name);
     if (ash.header != NULL)
     {
-        for (const char **ptr=ash.header; *ptr != NULL; ++ptr)
+        for( const char *const *ptr=ash.header; *ptr != NULL; ptr++ )
             printf_line(inf.indent, COLSTR("%s", SCOLOR_ASMDIR), *ptr);
     }
 

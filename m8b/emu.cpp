@@ -1,4 +1,5 @@
 #include "m8b.hpp"
+#include "queue.hpp"
 #include <frame.hpp>
 
 static bool fFlow;
